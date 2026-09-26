@@ -97,7 +97,14 @@ export function runParserTests() {
   r = parseSpokenQuantity('1 paav', 'packet');
   assert(!r.valid && r.error === 'UNIT_MISMATCH', '1 paav on packet item should reject');
 
-  console.log('✅ All 24 Quantity Parser Tests Passed Successfully!');
+  // 7. Alternate regional spellings (adha = aadha)
+  r = parseSpokenQuantity('adha kilo', 'kg');
+  assert(r.valid && r.normalizedQuantity === 0.5, 'adha kilo -> 0.5 kg');
+
+  r = parseSpokenQuantity('adha darjan', 'piece');
+  assert(r.valid && r.normalizedQuantity === 6, 'adha darjan -> 6 piece');
+
+  console.log('✅ All 26 Quantity Parser Tests Passed Successfully!');
 }
 
 // Auto-run if executed via ts-node or node

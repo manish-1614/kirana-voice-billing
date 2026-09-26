@@ -42,6 +42,8 @@ export default function KiranaBillingApp() {
   const wsRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<PcmAudioRecorder | null>(null);
   const isHoldingSpacebar = useRef<boolean>(false);
+  const sessionRef = useRef<SessionContext | null>(null);
+  sessionRef.current = session;
 
   // Load PIN from localStorage on mount
   useEffect(() => {
@@ -120,6 +122,7 @@ export default function KiranaBillingApp() {
           switch (msg.type) {
             case 'connection_ack':
               setSession(msg.session);
+              sessionRef.current = msg.session;
               if (msg.session?.sessionId) {
                 fetchSessionItems(msg.session.sessionId);
               }
@@ -178,17 +181,21 @@ export default function KiranaBillingApp() {
               // Update active session if updated by tool
               if (msg.session) {
                 setSession(msg.session);
+                sessionRef.current = msg.session;
               }
 
+              const activeSessionId = msg.session?.sessionId || sessionRef.current?.sessionId;
+
               if (msg.status === 'ok') {
-                if (session?.sessionId) {
-                  fetchSessionItems(session.sessionId);
+                if (activeSessionId) {
+                  fetchSessionItems(activeSessionId);
                 }
               } else if (msg.status === 'ambiguous') {
                 setAmbiguityState({
                   type: 'ambiguous',
                   message: msg.message,
                   query: msg.data?.query,
+                  spokenQuantity: msg.data?.spokenQuantity,
                   candidates: msg.data?.candidates,
                 });
               } else if (msg.status === 'not_found') {
@@ -202,12 +209,24 @@ export default function KiranaBillingApp() {
                   type: 'unit_mismatch',
                   message: msg.message,
                   query: msg.data?.spokenQuantity,
+                  spokenQuantity: msg.data?.spokenQuantity,
+                });
+              } else if (msg.status === 'no_tool_call') {
+                setAmbiguityState({
+                  type: 'no_tool_call',
+                  message: msg.message || 'No item or quantity recognized / आवाज़ समझ नहीं आई',
+                });
+              } else if (msg.status === 'error') {
+                setAmbiguityState({
+                  type: 'error',
+                  message: msg.message || 'Billing error / बिलिंग में त्रुटि',
                 });
               }
               break;
 
             case 'session_updated':
               setSession(msg.session);
+              sessionRef.current = msg.session;
               if (msg.session?.sessionId) {
                 fetchSessionItems(msg.session.sessionId);
               }
@@ -215,6 +234,10 @@ export default function KiranaBillingApp() {
 
             case 'error':
               console.error('[App] Server error message:', msg.message);
+              setAmbiguityState({
+                type: 'error',
+                message: msg.message || 'Server error',
+              });
               break;
           }
         } catch (err) {
@@ -298,6 +321,7 @@ export default function KiranaBillingApp() {
     isPressingMic.current = true;
 
     try {
+      setAmbiguityState(null);
       playEarcon('start');
       setMicState('listening');
 
@@ -376,8 +400,10 @@ export default function KiranaBillingApp() {
   }, []);
 
   const handleCandidateSelect = useCallback((candidateName: string) => {
-    handleSendTextPrompt(`${candidateName} 1`);
-  }, [handleSendTextPrompt]);
+    const qty = ambiguityState?.spokenQuantity || '1';
+    setAmbiguityState(null);
+    handleSendTextPrompt(`${candidateName} ${qty}`);
+  }, [handleSendTextPrompt, ambiguityState]);
 
   // Keyboard Hotkey support for Counter Keyboard (Spacebar, T, N, Esc, 1-9)
   useEffect(() => {

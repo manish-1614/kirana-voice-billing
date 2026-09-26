@@ -169,8 +169,76 @@ export async function runBridgeTests() {
   assert(toolResultMsgs[1].data?.canonical_name === 'Aashirvaad Atta', 'Second tool_result should be Atta');
   console.log('✅ Test 6 Passed: Multi-item burst processed sequentially with grouped Gemini toolResponse.');
 
+  // Test 7: Verify no_tool_call detection when speech produces no function calls
+  console.log('Testing Test 7: no_tool_call detection on turn completion without tools...');
+  bridge.startSpeech();
+  bridge.stopSpeech({ audioMsSent: 200, prerollMs: 100 });
+  const clientMsgCountBeforeEmptyTurn = mockClientWs.sentMessages.length;
+  mockGeminiWs.simulateIncoming({
+    serverContent: {
+      modelTurn: { parts: [{ text: 'Could not detect items' }] },
+      turnComplete: true,
+    },
+  });
+
+  const emptyTurnMsgs = mockClientWs.sentMessages.slice(clientMsgCountBeforeEmptyTurn).map((m) => JSON.parse(m));
+  const noToolCallMsg = emptyTurnMsgs.find((m) => m.type === 'tool_result' && m.status === 'no_tool_call');
+  assert(Boolean(noToolCallMsg), 'Expected no_tool_call tool_result when turn completes without function calls');
+  assert(noToolCallMsg.earcon === 'warning', 'Expected warning earcon for no_tool_call');
+  console.log('✅ Test 7 Passed: Empty turn surfaced actionable no_tool_call feedback.');
+
+  // Test 8: Four reported phrases in single burst: atta, chini, namak (half kg), maida (adha kilo)
+  console.log('Testing Test 8: Four reported phrases in burst (atta, chini, namak half kg, maida adha kilo)...');
+  bridge.startSpeech();
+  bridge.stopSpeech({ audioMsSent: 500, prerollMs: 200 });
+
+  const clientMsgCountBeforeReportedBurst = mockClientWs.sentMessages.length;
+  const geminiMsgCountBeforeReportedBurst = mockGeminiWs.sentMessages.length;
+
+  mockGeminiWs.simulateIncoming({
+    toolCall: {
+      functionCalls: [
+        { id: 'rep_1', name: 'add_line_item', args: { item_name: 'atta', quantity_text: 'do kilo' } },
+        { id: 'rep_2', name: 'add_line_item', args: { item_name: 'chini', quantity_text: 'teen kilo' } },
+        { id: 'rep_3', name: 'add_line_item', args: { item_name: 'namak', quantity_text: 'half kg' } },
+        { id: 'rep_4', name: 'add_line_item', args: { item_name: 'maida', quantity_text: 'adha kilo' } },
+      ],
+    },
+  });
+
+  await (bridge as any).toolExecutionQueue;
+
+  const burstClientMsgs = mockClientWs.sentMessages.slice(clientMsgCountBeforeReportedBurst).map((m) => JSON.parse(m));
+  const burstResults = burstClientMsgs.filter((m) => m.type === 'tool_result');
+  assert(burstResults.length === 4, `Expected 4 tool_result events, got ${burstResults.length}`);
+
+  // Item 1: Atta -> ok, 2 kg
+  assert(burstResults[0].status === 'ok' && burstResults[0].data?.canonical_name === 'Aashirvaad Atta', 'Atta should be added');
+  assert(burstResults[0].data?.quantity === 2, 'Atta should be 2 kg');
+
+  // Item 2: Chini -> ok, 3 kg
+  assert(burstResults[1].status === 'ok' && burstResults[1].data?.canonical_name === 'Sugar (Chini)', 'Chini should be added');
+  assert(burstResults[1].data?.quantity === 3, 'Chini should be 3 kg');
+
+  // Item 3: Namak half kg -> ambiguous with candidate variants (Loose vs Tata salt)
+  assert(burstResults[2].status === 'ambiguous', 'Namak half kg on packet default should prompt ambiguous variants');
+  assert(burstResults[2].data?.candidates?.length >= 2, 'Namak candidates should include variant alternatives');
+
+  // Item 4: Maida adha kilo -> ok, 0.5 kg (Rs 20)
+  assert(burstResults[3].status === 'ok' && burstResults[3].data?.canonical_name === 'Maida', 'Maida should be added');
+  assert(burstResults[3].data?.quantity === 0.5, 'Maida adha kilo must parse to 0.5 kg');
+  assert(burstResults[3].data?.line_total === 20, 'Maida 0.5kg @ Rs 40 must total Rs 20');
+
+  // Grouped toolResponse check
+  const burstGeminiMsgs = mockGeminiWs.sentMessages.slice(geminiMsgCountBeforeReportedBurst).map((m) => JSON.parse(m));
+  const burstToolResp = burstGeminiMsgs.filter((m) => m.toolResponse !== undefined);
+  assert(burstToolResp.length === 1, 'Expected 1 grouped toolResponse message for all 4 items');
+  assert(burstToolResp[0].toolResponse.functionResponses.length === 4, 'Expected 4 functionResponses in grouped message');
+
+  console.log('✅ Test 8 Passed: Four reported phrases handled with correct resolution, variant ambiguity, and adha normalization.');
+
   bridge.destroy();
-  console.log('\n🎉 ALL 6 GEMINI LIVE BRIDGE TESTS PASSED SUCCESSFULLY!');
+  console.log('\n🎉 ALL 8 GEMINI LIVE BRIDGE TESTS PASSED SUCCESSFULLY!');
 }
 
 // Direct execution support

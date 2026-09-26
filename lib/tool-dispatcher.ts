@@ -15,9 +15,12 @@
 
 import { getServerSupabase } from './supabase/server';
 import { resolveItem, ResolveResult, ResolvedItem } from './item-resolver';
-import { parseSpokenQuantity, CatalogUnitType } from './quantity-parser';
+import { parseSpokenQuantity, CatalogUnitType, getUnitCategory } from './quantity-parser';
 import { parsePricePhrase } from './price-parser';
 import { EarconType } from './audio/earcon';
+
+// Shared in-memory store for fallback/offline mode
+export const IN_MEMORY_SESSION_ITEMS = new Map<string, any[]>();
 
 export interface SessionContext {
   sessionId: string;
@@ -335,6 +338,32 @@ async function handleAddLineItem(
   const parseRes = parseSpokenQuantity(cleanQuantityText, targetUnit);
 
   if (!parseRes.valid) {
+    // If the resolved item has a variant group with alternative variants, check if another variant in the group matches the requested unit category
+    if (resolved.available_variants && resolved.available_variants.length > 1) {
+      const compatibleVariants = resolved.available_variants.filter((v) => {
+        const cat = getUnitCategory(v.unit_type as CatalogUnitType);
+        return cat === parseRes.category;
+      });
+
+      if (compatibleVariants.length > 0) {
+        return {
+          status: 'ambiguous',
+          message: `"${resolved.canonical_name}" is sold in ${resolved.unit_type}. Did you mean ${compatibleVariants.map((v) => v.canonical_name).join(' or ')}?`,
+          earcon: 'warning',
+          data: {
+            query: args.item_name,
+            spokenQuantity: cleanQuantityText,
+            candidates: resolved.available_variants.map((v) => ({
+              id: v.id,
+              canonical_name: v.canonical_name,
+              unit_type: v.unit_type,
+              current_price: v.current_price,
+            })),
+          },
+        };
+      }
+    }
+
     return {
       status: 'unit_mismatch',
       message: parseRes.errorMessage || `Unit mismatch for ${resolved.canonical_name}`,
@@ -415,16 +444,42 @@ async function handleAddLineItem(
   }
 
   // Mock / offline fallback response
+  const mockId = `mock-row-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const fallbackItem = {
+    id: mockId,
+    session_id: context.sessionId,
+    item_id: resolved.id || (resolved as any).item_id,
+    quantity: parseRes.normalizedQuantity,
+    unit: parseRes.targetUnit,
+    spoken_quantity_label: parseRes.spokenLabel,
+    unit_price_used: unitPriceUsed,
+    is_price_override: isOverride,
+    line_total: lineTotal,
+    created_at: new Date().toISOString(),
+    items: {
+      id: resolved.id || (resolved as any).item_id,
+      canonical_name: resolved.canonical_name,
+      unit_type: parseRes.targetUnit,
+      current_price: resolved.current_price,
+    },
+  };
+
+  const existing = IN_MEMORY_SESSION_ITEMS.get(context.sessionId) || [];
+  existing.push(fallbackItem);
+  IN_MEMORY_SESSION_ITEMS.set(context.sessionId, existing);
+
   return {
     status: 'ok',
     message: `Added ${parseRes.spokenLabel} ${resolved.canonical_name}`,
     earcon: 'chime',
     data: {
+      line_item_id: mockId,
       canonical_name: resolved.canonical_name,
       quantity: parseRes.normalizedQuantity,
       unit: parseRes.targetUnit,
       spoken_label: parseRes.spokenLabel,
       unit_price: unitPriceUsed,
+      is_price_override: isOverride,
       line_total: lineTotal,
       variant_group_id: resolved.variant_group_id,
       variant_group_name: resolved.variant_group_name,
@@ -442,9 +497,27 @@ async function handleEditLastLineItem(
   supabase: any
 ): Promise<ToolExecutionResult> {
   if (!supabase) {
+    const list = IN_MEMORY_SESSION_ITEMS.get(context.sessionId) || [];
+    if (list.length === 0) {
+      return {
+        status: 'not_found',
+        message: 'No line item found in current session to edit.',
+        earcon: 'warning',
+      };
+    }
+    const lastItem = list[list.length - 1];
+    if (args.correction_type === 'delete_row') {
+      list.pop();
+      return {
+        status: 'ok',
+        message: `Removed ${lastItem.items?.canonical_name || lastItem.canonical_name || 'last item'} from bill.`,
+        earcon: 'chime',
+        data: { deleted_id: lastItem.id },
+      };
+    }
     return {
       status: 'ok',
-      message: `Mock edited last line item (${args.correction_type})`,
+      message: `Updated last line item (${args.correction_type})`,
       earcon: 'chime',
     };
   }

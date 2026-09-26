@@ -25,6 +25,7 @@ export interface ParseResult {
 
 const HINDI_NUMBER_WORDS: Record<string, number> = {
   'aadha': 0.5,
+  'adha': 0.5,
   'half': 0.5,
   'paav': 0.25,
   'dedh': 1.5,
@@ -98,7 +99,7 @@ export function parseSpokenQuantity(rawText: string, catalogUnitType: CatalogUni
       return mismatchResult(rawText, 'count', targetCategory, catalogUnitType);
     }
     let count = 12;
-    if (text.includes('aadha') || text.includes('half')) {
+    if (text.includes('aadha') || text.includes('adha') || text.includes('half')) {
       count = 6;
     } else {
       const match = text.match(/(\d+|ek|do|teen|char|paanch)/);
@@ -117,7 +118,7 @@ export function parseSpokenQuantity(rawText: string, catalogUnitType: CatalogUni
   }
 
   // 2. Colloquial Paav variants (1 paav = 0.25 kg)
-  const paavMatch = text.match(/(?:(\d+|ek|do|teen|char|paanch|aadha)\s*)?paav/);
+  const paavMatch = text.match(/(?:(\d+|ek|do|teen|char|paanch|aadha|adha)\s*)?paav/);
   if (paavMatch) {
     if (targetCategory !== 'weight') {
       return mismatchResult(rawText, 'weight', targetCategory, catalogUnitType);
@@ -244,7 +245,7 @@ export function parseSpokenQuantity(rawText: string, catalogUnitType: CatalogUni
       const numMatch = text.match(/(\d+(?:\.\d+)?)/);
       const ml = numMatch ? parseFloat(numMatch[1]) : 500;
       litres = ml / 1000;
-    } else if (text.includes('aadha') || text.includes('half')) {
+    } else if (text.includes('aadha') || text.includes('adha') || text.includes('half')) {
       litres = 0.5;
     } else {
       const num = extractLeadingNumber(text);
@@ -269,7 +270,7 @@ export function parseSpokenQuantity(rawText: string, catalogUnitType: CatalogUni
   let quantity = extractLeadingNumber(text) || 1;
 
   if (targetCategory === 'weight') {
-    if (text.includes('aadha') || text.includes('half')) {
+    if (text.includes('aadha') || text.includes('adha') || text.includes('half')) {
       quantity = 0.5;
     }
     if (catalogUnitType === 'g') {

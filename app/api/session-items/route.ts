@@ -4,6 +4,7 @@ import { parseSpokenQuantity, CatalogUnitType } from '@/lib/quantity-parser';
 import { parsePricePhrase } from '@/lib/price-parser';
 import { attachVariantInfo } from '@/lib/item-resolver';
 import { SEED_CATALOG } from '@/lib/catalog-data';
+import { IN_MEMORY_SESSION_ITEMS } from '@/lib/tool-dispatcher';
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -15,7 +16,32 @@ export async function GET(req: NextRequest) {
 
   const supabase = getServerSupabase();
   if (!supabase) {
-    return NextResponse.json({ items: [] });
+    const memoryItems = IN_MEMORY_SESSION_ITEMS.get(sessionId) || [];
+    const formatted = memoryItems.map((row: any) => {
+      const variantData = attachVariantInfo({
+        id: row.items?.id || row.item_id,
+        canonical_name: row.items?.canonical_name || 'Unknown Item',
+        unit_type: row.items?.unit_type || row.unit,
+        current_price: row.items?.current_price || row.unit_price_used,
+        matched_alias: '',
+        similarity: 1.0,
+        is_exact: true,
+      });
+      return {
+        id: row.id,
+        canonical_name: row.items?.canonical_name || 'Unknown Item',
+        quantity: row.quantity,
+        unit: row.unit,
+        spoken_quantity_label: row.spoken_quantity_label,
+        unit_price: row.unit_price_used,
+        line_total: row.line_total,
+        is_price_override: row.is_price_override,
+        variant_group_id: variantData.variant_group_id,
+        variant_group_name: variantData.variant_group_name,
+        available_variants: variantData.available_variants,
+      };
+    });
+    return NextResponse.json({ items: formatted });
   }
 
   const { data: items, error } = await supabase

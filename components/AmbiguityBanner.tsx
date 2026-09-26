@@ -2,9 +2,10 @@ import React from 'react';
 import { HelpCircle, AlertTriangle, AlertOctagon, X, ArrowRight } from 'lucide-react';
 
 export interface AmbiguityState {
-  type: 'ambiguous' | 'not_found' | 'unit_mismatch';
+  type: 'ambiguous' | 'not_found' | 'unit_mismatch' | 'no_tool_call' | 'error';
   message: string;
   query?: string;
+  spokenQuantity?: string;
   candidates?: Array<{
     id: string;
     canonical_name: string;
@@ -32,7 +33,7 @@ export const AmbiguityBanner: React.FC<AmbiguityBannerProps> = ({
       className={`rounded-3xl p-5 border shadow-md transition-all animate-in fade-in slide-in-from-top-2 duration-200 ${
         state.type === 'ambiguous'
           ? 'bg-gradient-to-r from-amber-50 to-orange-50/50 border-amber-300/80 text-amber-950 shadow-amber-500/5'
-          : state.type === 'unit_mismatch'
+          : state.type === 'unit_mismatch' || state.type === 'error'
           ? 'bg-gradient-to-r from-rose-50 to-pink-50/50 border-rose-300/80 text-rose-950 shadow-rose-500/5'
           : 'bg-gradient-to-r from-slate-100 to-zinc-100 border-slate-300 text-slate-900 shadow-slate-500/5'
       }`}
@@ -43,12 +44,12 @@ export const AmbiguityBanner: React.FC<AmbiguityBannerProps> = ({
             className={`p-2.5 rounded-2xl shrink-0 mt-0.5 shadow-xs ${
               state.type === 'ambiguous'
                 ? 'bg-amber-200/80 text-amber-900 border border-amber-300'
-                : state.type === 'unit_mismatch'
+                : state.type === 'unit_mismatch' || state.type === 'error'
                 ? 'bg-rose-200/80 text-rose-900 border border-rose-300'
                 : 'bg-slate-200 text-slate-800 border border-slate-300'
             }`}
           >
-            {state.type === 'unit_mismatch' ? (
+            {state.type === 'unit_mismatch' || state.type === 'error' ? (
               <AlertTriangle className="w-5 h-5 stroke-[2.25]" />
             ) : state.type === 'ambiguous' ? (
               <HelpCircle className="w-5 h-5 stroke-[2.25]" />
@@ -64,6 +65,10 @@ export const AmbiguityBanner: React.FC<AmbiguityBannerProps> = ({
                   ? 'Multiple Items Found / कौन सा सामान चाहिए?'
                   : state.type === 'unit_mismatch'
                   ? 'Unit Mismatch / माप में अंतर'
+                  : state.type === 'no_tool_call'
+                  ? 'No Item Recognized / आवाज़ समझ नहीं आई'
+                  : state.type === 'error'
+                  ? 'Billing Error / बिलिंग में त्रुटि'
                   : 'Unrecognized Item / सामान सूची में नहीं मिला'}
               </h4>
               {state.query && (

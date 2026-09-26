@@ -55,6 +55,8 @@ export class GeminiLiveBridge {
   private isToolTurnPending = false;
   private isSpeechQueued = false;
   private isSpeechEndQueued = false;
+  private hasToolCallInTurn = false;
+  private hasUtteranceActive = false;
   private queuedAudioChunks: Buffer[] = [];
   private toolExecutionQueue: Promise<void> = Promise.resolve();
 
@@ -234,6 +236,8 @@ export class GeminiLiveBridge {
     this.audioChunks = [];
     this.totalBufferedBytes = 0;
     this.utteranceStartTime = Date.now();
+    this.hasToolCallInTurn = false;
+    this.hasUtteranceActive = true;
 
     this.notifyClient({
       type: 'status_change',
@@ -315,6 +319,8 @@ export class GeminiLiveBridge {
 
     this.utteranceStartTime = Date.now();
     this.utteranceEndTime = Date.now();
+    this.hasToolCallInTurn = false;
+    this.hasUtteranceActive = true;
 
     const textMessage = {
       clientContent: {
@@ -366,6 +372,7 @@ export class GeminiLiveBridge {
 
       // 2. Function calls via top-level toolCall
       if (response.toolCall?.functionCalls) {
+        this.hasToolCallInTurn = true;
         this.isToolTurnPending = true;
         const calls = response.toolCall.functionCalls.map((fc: any) => ({
           name: fc.name,
@@ -401,17 +408,34 @@ export class GeminiLiveBridge {
         }
 
         if (modelCalls.length > 0) {
+          this.hasToolCallInTurn = true;
           this.isToolTurnPending = true;
           this.toolExecutionQueue = this.toolExecutionQueue.then(() =>
             this.executeBatchAndRespond(modelCalls)
           );
         }
 
-        if (response.serverContent.turnComplete && !this.isToolTurnPending && !this.isSpeechQueued) {
-          this.notifyClient({
-            type: 'status_change',
-            status: 'ready',
-          });
+        if (response.serverContent.turnComplete) {
+          if (this.hasUtteranceActive && !this.hasToolCallInTurn && !this.isToolTurnPending) {
+            this.hasUtteranceActive = false;
+            this.notifyClient({
+              type: 'tool_result',
+              tool: 'none',
+              status: 'no_tool_call',
+              earcon: 'warning',
+              message: 'No item or quantity recognized / आवाज़ समझ नहीं आई',
+              session: this.sessionContext,
+            });
+          }
+          if (this.hasToolCallInTurn) {
+            this.hasUtteranceActive = false;
+          }
+          if (!this.isToolTurnPending && !this.isSpeechQueued) {
+            this.notifyClient({
+              type: 'status_change',
+              status: 'ready',
+            });
+          }
         }
       }
     } catch (err) {
