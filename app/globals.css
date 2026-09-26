@@ -86,3 +86,20 @@ body {
 .animate-laser-shimmer {
   animation: laserShimmer 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
+
+/* Ambient Pulse Glow for Mic Processing */
+@keyframes processingPulse {
+  0%, 100% {
+    transform: scale(0.96);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.18);
+    opacity: 0.85;
+  }
+}
+
+.animate-processing-pulse {
+  animation: processingPulse 1.6s ease-in-out infinite;
+}
+

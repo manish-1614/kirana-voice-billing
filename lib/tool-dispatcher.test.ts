@@ -138,7 +138,28 @@ async function runTests() {
   assert(res10.data.customer_number > context.customerNumber, 'Expected higher customer token');
   console.log(`✅ Test 10 Passed: Started new bill -> Token #${res10.data.customer_number}`);
 
-  console.log('\n🎉 ALL 10 TOOL DISPATCHER TESTS PASSED SUCCESSFULLY!\n');
+  // Test 11: add_line_item with Hindi price word phrase ("besan", "1 kilo", price_override: "nabbe rupaye")
+  const res11 = await dispatchToolCall('add_line_item', {
+    item_name: 'besan',
+    quantity_text: '1 kilo',
+    price_override: 'nabbe rupaye',
+  }, res10.contextUpdate ? { ...context, ...res10.contextUpdate } : context);
+
+  assert(res11.status === 'ok', `Expected 'ok', got ${res11.status}`);
+  assert(res11.data.unit_price === 90, `Expected unit price 90, got ${res11.data.unit_price}`);
+  console.log(`✅ Test 11 Passed: Added line item with spoken Hindi price phrase "nabbe rupaye" -> Rs ${res11.data.unit_price}`);
+
+  // Test 12: Ensure override is NOT carried over to next line item in the session
+  const res12 = await dispatchToolCall('add_line_item', {
+    item_name: 'besan',
+    quantity_text: '1 kilo',
+  }, res10.contextUpdate ? { ...context, ...res10.contextUpdate } : context);
+
+  assert(res12.status === 'ok', `Expected 'ok', got ${res12.status}`);
+  assert(res12.data.is_price_override === false, 'Next item without override must have is_price_override: false');
+  console.log(`✅ Test 12 Passed: Subsequent item correctly used default catalog rate without leaking previous override.`);
+
+  console.log('\n🎉 ALL 12 TOOL DISPATCHER TESTS PASSED SUCCESSFULLY!\n');
 }
 
 runTests().catch((err) => {

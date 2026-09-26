@@ -16,6 +16,7 @@
 import { getServerSupabase } from './supabase/server';
 import { resolveItem, ResolveResult, ResolvedItem } from './item-resolver';
 import { parseSpokenQuantity, CatalogUnitType } from './quantity-parser';
+import { parsePricePhrase } from './price-parser';
 import { EarconType } from './audio/earcon';
 
 export interface SessionContext {
@@ -52,8 +53,8 @@ export const GEMINI_TOOL_DECLARATIONS = [
           description: 'Raw spoken quantity phrase, romanized, unmodified (e.g. "aadha kilo", "1 paav", "dhai sau gram", "2 packet").',
         },
         price_override: {
-          type: 'NUMBER',
-          description: 'Optional negotiated unit price for this line item only (e.g. 70 for chini if customer negotiated).',
+          type: 'STRING',
+          description: 'Optional negotiated unit price or phrase for this line item only (e.g. "70", "nabbe", "pachpan rupaye", "rate 35"). Do not use for permanent rate changes.',
         },
       },
       required: ['item_name', 'quantity_text'],
@@ -72,7 +73,7 @@ export const GEMINI_TOOL_DECLARATIONS = [
         },
         new_value: {
           type: 'STRING',
-          description: 'Spoken new value, romanized (e.g. "aata" for change_item, "1 kilo" for change_quantity, "75" for change_price). Omit for delete_row.',
+          description: 'Spoken new value, romanized (e.g. "aata" for change_item, "1 kilo" for change_quantity, "75" or "nabbe" for change_price). Omit for delete_row.',
         },
       },
       required: ['correction_type'],
@@ -89,8 +90,8 @@ export const GEMINI_TOOL_DECLARATIONS = [
           description: 'Spoken item name in Roman Hinglish whose catalog price should change.',
         },
         new_price: {
-          type: 'NUMBER',
-          description: 'New numeric price per canonical unit.',
+          type: 'STRING',
+          description: 'New numeric price or spoken number phrase per canonical unit (e.g. "75", "nabbe", "pachpan").',
         },
       },
       required: ['item_name', 'new_price'],
@@ -274,7 +275,7 @@ export async function dispatchToolCall(
  * Handler 1: add_line_item
  */
 async function handleAddLineItem(
-  args: { item_name: string; quantity_text: string; price_override?: number },
+  args: { item_name: string; quantity_text: string; price_override?: number | string },
   context: SessionContext,
   supabase: any
 ): Promise<ToolExecutionResult> {
@@ -347,8 +348,22 @@ async function handleAddLineItem(
   }
 
   // 3. Snapshot unit price at add-time (mid-bill price immutability per HLD §3.10)
-  const isOverride = typeof args.price_override === 'number' && args.price_override > 0 && args.price_override !== resolved.current_price;
-  const unitPriceUsed = isOverride ? (args.price_override as number) : resolved.current_price;
+  let isOverride = false;
+  let unitPriceUsed = resolved.current_price;
+
+  if (args.price_override !== undefined && args.price_override !== null && args.price_override !== '') {
+    const parsePriceRes = parsePricePhrase(args.price_override);
+    if (!parsePriceRes.valid) {
+      return {
+        status: 'error',
+        message: `Invalid price override "${args.price_override}": ${parsePriceRes.error || ''}`,
+        earcon: 'warning',
+      };
+    }
+    const overridePrice = parsePriceRes.price!;
+    isOverride = overridePrice !== resolved.current_price;
+    unitPriceUsed = overridePrice;
+  }
 
   // Calculate line total: normalizedQuantity * unitPrice, rounded to 2 decimal places
   const lineTotal = Math.round(parseRes.normalizedQuantity * unitPriceUsed * 100) / 100;
@@ -392,6 +407,9 @@ async function handleAddLineItem(
         unit_price: unitPriceUsed,
         is_price_override: isOverride,
         line_total: lineTotal,
+        variant_group_id: resolved.variant_group_id,
+        variant_group_name: resolved.variant_group_name,
+        available_variants: resolved.available_variants,
       },
     };
   }
@@ -408,6 +426,9 @@ async function handleAddLineItem(
       spoken_label: parseRes.spokenLabel,
       unit_price: unitPriceUsed,
       line_total: lineTotal,
+      variant_group_id: resolved.variant_group_id,
+      variant_group_name: resolved.variant_group_name,
+      available_variants: resolved.available_variants,
     },
   };
 }
@@ -514,10 +535,11 @@ async function handleEditLastLineItem(
         return { status: 'error', message: 'Missing new price value', earcon: 'warning' };
       }
 
-      const parsedPrice = parseFloat(args.new_value.replace(/[^0-9.]/g, ''));
-      if (isNaN(parsedPrice) || parsedPrice <= 0) {
-        return { status: 'error', message: `Invalid price: "${args.new_value}"`, earcon: 'warning' };
+      const parsePriceRes = parsePricePhrase(args.new_value);
+      if (!parsePriceRes.valid) {
+        return { status: 'error', message: `Invalid price: "${args.new_value}". ${parsePriceRes.error || ''}`, earcon: 'warning' };
       }
+      const parsedPrice = parsePriceRes.price!;
 
       const newLineTotal = Math.round(lastItem.quantity * parsedPrice * 100) / 100;
 
@@ -600,6 +622,9 @@ async function handleEditLastLineItem(
           updated_id: lastItem.id,
           canonical_name: newItem.canonical_name,
           line_total: newLineTotal,
+          variant_group_id: newItem.variant_group_id,
+          variant_group_name: newItem.variant_group_name,
+          available_variants: newItem.available_variants,
         },
       };
     }
@@ -610,19 +635,27 @@ async function handleEditLastLineItem(
  * Handler 3: update_catalog_price (with price_history audit trail)
  */
 async function handleUpdateCatalogPrice(
-  args: { item_name: string; new_price: number },
+  args: { item_name: string; new_price: number | string },
   supabase: any
 ): Promise<ToolExecutionResult> {
   const cleanItemName = (args.item_name || '').trim();
-  const newPrice = typeof args.new_price === 'number' ? args.new_price : parseFloat(args.new_price);
-
-  if (!cleanItemName || isNaN(newPrice) || newPrice < 0) {
+  if (!cleanItemName) {
     return {
       status: 'error',
-      message: 'Invalid item_name or new_price',
+      message: 'Invalid item_name',
       earcon: 'warning',
     };
   }
+
+  const parsePriceRes = parsePricePhrase(args.new_price);
+  if (!parsePriceRes.valid) {
+    return {
+      status: 'error',
+      message: `Invalid rate: "${args.new_price}". ${parsePriceRes.error || ''}`,
+      earcon: 'warning',
+    };
+  }
+  const newPrice = parsePriceRes.price!;
 
   const resolveRes = await resolveItem(cleanItemName);
   if (resolveRes.status !== 'ok' || !resolveRes.item) {

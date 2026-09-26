@@ -149,14 +149,14 @@ export class GeminiLiveBridge {
               text: [
                 'You are a silent billing assistant at a kirana shop counter in Ranchi. The shopkeeper speaks Hinglish.',
                 'Rules:',
-                '1. On an item + quantity, call add_line_item immediately. Never ask for confirmation.',
-                '2. Pass price_override only if a specific rate is quoted for this sale ("chini 70 rupaye me lagao").',
+                '1. On items and quantities, call add_line_item for each item/quantity pair in the utterance. If the operator speaks multiple items in one burst (e.g. "chini aadha kilo, atta ek kilo, chai patti do packet"), emit a separate add_line_item call for each one in order. Each call must represent exactly one item and its own quantity. Never combine several items into one item name or quantity.',
+                '2. Pass price_override only if a specific sale rate is quoted for that item ("chini aadha kilo, 70 rupaye me lagao", "atta ek kilo, rate 35"). In multi-item bursts, attach each spoken price_override strictly to the item it describes. Pass price_override as spoken (e.g. "70", "nabbe", "rate 35"). Do not carry an override across calls.',
                 '3. Corrections to the last row ("chini nahi, aata", "quantity 1 kilo karo", "wo hata do") -> edit_last_line_item.',
                 '4. "total batao" / "bill complete" -> close_bill.',
-                '5. "chini ka rate 75 karo" (permanent rate change) -> update_catalog_price.',
+                '5. "chini ka rate 75 karo" (explicit permanent catalog rate change) -> update_catalog_price. Never confuse a one-sale negotiated rate with a permanent catalog update.',
                 '6. "token 12 kholo" -> open_session. "naya bill" -> start_new_bill.',
-                '7. Output item_name and quantity_text in Roman script (Hinglish), never Devanagari. Pass quantity_text exactly as spoken; do not convert or compute numbers.',
-                '8. One item per utterance. Never speak conversational filler; the screen is the response.',
+                '7. Output item_name and quantity_text in Roman script (Hinglish), never Devanagari. Pass quantity_text and price_override exactly as spoken; do not convert or compute numbers.',
+                '8. Never speak conversational filler; the screen and audio cues are the response.',
               ].join('\n'),
             },
           ],
@@ -367,12 +367,14 @@ export class GeminiLiveBridge {
       // 2. Function calls via top-level toolCall
       if (response.toolCall?.functionCalls) {
         this.isToolTurnPending = true;
-        for (const fc of response.toolCall.functionCalls) {
-          // Serialize tool executions to maintain strict row order
-          this.toolExecutionQueue = this.toolExecutionQueue.then(() =>
-            this.executeAndRespondTool(fc.name, fc.args, fc.id)
-          );
-        }
+        const calls = response.toolCall.functionCalls.map((fc: any) => ({
+          name: fc.name,
+          args: fc.args,
+          id: fc.id,
+        }));
+        this.toolExecutionQueue = this.toolExecutionQueue.then(() =>
+          this.executeBatchAndRespond(calls)
+        );
       }
 
       // 3. Server content (model turn)
@@ -380,6 +382,8 @@ export class GeminiLiveBridge {
         // Discard any model audio chunks (silent counter operation per HLD §3.7)
 
         const parts = response.serverContent.modelTurn?.parts || [];
+        const modelCalls: { name: string; args: any; id: string }[] = [];
+
         for (const part of parts) {
           // Model text thoughts or reasoning: logged to server only, hidden from counter UI
           if (part.text) {
@@ -388,15 +392,19 @@ export class GeminiLiveBridge {
 
           // Check if function call arrived inside modelTurn
           if (part.functionCall) {
-            this.isToolTurnPending = true;
-            this.toolExecutionQueue = this.toolExecutionQueue.then(() =>
-              this.executeAndRespondTool(
-                part.functionCall.name,
-                part.functionCall.args,
-                part.functionCall.id || `call_${Date.now()}`
-              )
-            );
+            modelCalls.push({
+              name: part.functionCall.name,
+              args: part.functionCall.args,
+              id: part.functionCall.id || `call_${Date.now()}_${modelCalls.length}`,
+            });
           }
+        }
+
+        if (modelCalls.length > 0) {
+          this.isToolTurnPending = true;
+          this.toolExecutionQueue = this.toolExecutionQueue.then(() =>
+            this.executeBatchAndRespond(modelCalls)
+          );
         }
 
         if (response.serverContent.turnComplete && !this.isToolTurnPending && !this.isSpeechQueued) {
@@ -412,95 +420,108 @@ export class GeminiLiveBridge {
   }
 
   /**
-   * Executes a tool call, replies to Gemini, notifies client, and dispatches any queued overlapping speech
+   * Executes a batch of tool calls for a turn, streams individual notifications to the client tablet,
+   * groups all function responses into one message back to Gemini Live, and releases queued speech.
    */
-  private async executeAndRespondTool(toolName: string, args: any, callId: string) {
-    const toolStartTime = Date.now();
-    const toolCallLatency = this.utteranceEndTime ? (toolStartTime - this.utteranceEndTime) : 0;
-    const detectedSpeech = this.formatDetectedSpeech(toolName, args);
+  private async executeBatchAndRespond(calls: { name: string; args: any; id: string }[]) {
+    const functionResponses: Array<{ id: string; response: { output: any } }> = [];
 
-    console.log(`\n[Gemini Bridge] 🛠️ Tool Call Received (${toolCallLatency}ms post-utterance):`);
-    console.log(`   Tool: ${toolName}`);
-    console.log(`   Args:`, JSON.stringify(args));
-    console.log(`   Detected Speech: ${detectedSpeech}`);
+    for (const call of calls) {
+      const toolStartTime = Date.now();
+      const toolCallLatency = this.utteranceEndTime ? (toolStartTime - this.utteranceEndTime) : 0;
+      const detectedSpeech = this.formatDetectedSpeech(call.name, call.args);
 
-    // Notify client immediately about detected speech before DB commit
-    this.notifyClient({
-      type: 'voice_detected',
-      tool: toolName,
-      detectedSpeech,
-      args,
-    });
+      console.log(`\n[Gemini Bridge] 🛠️ Tool Call Received (${toolCallLatency}ms post-utterance):`);
+      console.log(`   Tool: ${call.name}`);
+      console.log(`   Args:`, JSON.stringify(call.args));
+      console.log(`   Detected Speech: ${detectedSpeech}`);
 
-    // Execute tool against Supabase database
-    const result: ToolExecutionResult = await dispatchToolCall(toolName, args, this.sessionContext);
-    const dbCommitTime = Date.now();
-    const dbLatency = dbCommitTime - toolStartTime;
-    const totalLatency = this.utteranceEndTime ? (dbCommitTime - this.utteranceEndTime) : dbLatency;
+      // Notify client immediately about detected speech before DB commit
+      this.notifyClient({
+        type: 'voice_detected',
+        tool: call.name,
+        detectedSpeech,
+        args: call.args,
+      });
 
-    console.log(`[Gemini Bridge] 💾 Tool Result [${result.status}] in ${dbLatency}ms (Total: ${totalLatency}ms | AudioSent: ${this.lastAudioMsSent}ms, PreRoll: ${this.lastPrerollMs}ms):`);
-    console.log(`   Message: ${result.message || ''}`);
-    console.log(`   Earcon:  ${result.earcon}`);
+      // Execute tool against Supabase database
+      const result: ToolExecutionResult = await dispatchToolCall(call.name, call.args, this.sessionContext);
+      const dbCommitTime = Date.now();
+      const dbLatency = dbCommitTime - toolStartTime;
+      const totalLatency = this.utteranceEndTime ? (dbCommitTime - this.utteranceEndTime) : dbLatency;
 
-    // Update internal session context if changed (e.g. start_new_bill, close_bill, open_session)
-    if (result.contextUpdate) {
-      this.sessionContext = {
-        ...this.sessionContext,
-        ...result.contextUpdate,
-      };
-      if (this.onContextChange) {
-        this.onContextChange(this.sessionContext);
+      console.log(`[Gemini Bridge] 💾 Tool Result [${result.status}] in ${dbLatency}ms (Total: ${totalLatency}ms | AudioSent: ${this.lastAudioMsSent}ms, PreRoll: ${this.lastPrerollMs}ms):`);
+      console.log(`   Message: ${result.message || ''}`);
+      console.log(`   Earcon:  ${result.earcon}`);
+
+      // Update internal session context if changed (e.g. start_new_bill, close_bill, open_session)
+      if (result.contextUpdate) {
+        this.sessionContext = {
+          ...this.sessionContext,
+          ...result.contextUpdate,
+        };
+        if (this.onContextChange) {
+          this.onContextChange(this.sessionContext);
+        }
       }
+
+      // Notify the client tablet with individual row update, earcon cue, and latency metrics
+      this.notifyClient({
+        type: 'tool_result',
+        tool: call.name,
+        status: result.status,
+        earcon: result.earcon,
+        message: result.message,
+        data: result.data,
+        detectedSpeech,
+        args: call.args,
+        session: this.sessionContext,
+        latency: {
+          geminiLiveMs: toolCallLatency,
+          dbCommitMs: dbLatency,
+          totalMs: totalLatency,
+        },
+        telemetry: {
+          audioMsSent: this.lastAudioMsSent,
+          prerollMs: this.lastPrerollMs,
+        },
+      });
+
+      // Collect response for grouped toolResponse message
+      functionResponses.push({
+        id: call.id,
+        response: {
+          output: {
+            status: result.status,
+            message: result.message,
+            data: result.data,
+          },
+        },
+      });
     }
 
-    // 1. Send tool response back to Gemini Live to complete the model turn
-    if (this.geminiWs && this.geminiWs.readyState === WebSocket.OPEN) {
+    // 1. Send single grouped toolResponse message back to Gemini Live once all calls in batch complete
+    if (this.geminiWs && this.geminiWs.readyState === WebSocket.OPEN && functionResponses.length > 0) {
       const toolResponseMsg = {
         toolResponse: {
-          functionResponses: [
-            {
-              id: callId,
-              response: {
-                output: {
-                  status: result.status,
-                  message: result.message,
-                  data: result.data,
-                },
-              },
-            },
-          ],
+          functionResponses,
         },
       };
       this.geminiWs.send(JSON.stringify(toolResponseMsg));
     }
 
-    // Mark tool turn completed
+    // Mark tool turn completed only after the whole batch finished
     this.isToolTurnPending = false;
 
-    // 2. Notify the client tablet with status, earcon cue, and latency metrics
-    this.notifyClient({
-      type: 'tool_result',
-      tool: toolName,
-      status: result.status,
-      earcon: result.earcon,
-      message: result.message,
-      data: result.data,
-      detectedSpeech,
-      args,
-      session: this.sessionContext,
-      latency: {
-        geminiLiveMs: toolCallLatency,
-        dbCommitMs: dbLatency,
-        totalMs: totalLatency,
-      },
-      telemetry: {
-        audioMsSent: this.lastAudioMsSent,
-        prerollMs: this.lastPrerollMs,
-      },
-    });
-
-    // 3. Process any queued speech that arrived while this tool call was in flight
+    // 2. Process any queued speech that arrived while this batch was executing
     this.dispatchQueuedSpeechIfAny();
+  }
+
+  /**
+   * Backward compatibility helper for single tool call execution
+   */
+  private async executeAndRespondTool(toolName: string, args: any, callId: string) {
+    return this.executeBatchAndRespond([{ name: toolName, args, id: callId }]);
   }
 
   /**

@@ -54,6 +54,28 @@ export async function runResolverTests() {
   r = await resolveItem('pizza cheese burst');
   assert(r.status === 'not_found', 'Unknown item must return not_found');
 
+  // 7. Variant Group Default Resolution: "usna chawal" -> default "Usna Chawal (Baba)"
+  r = await resolveItem('usna chawal');
+  assert(r.status === 'ok', 'Group alias "usna chawal" must resolve to ok');
+  assert(r.item?.canonical_name === 'Usna Chawal (Baba)', `Expected default "Usna Chawal (Baba)", got ${r.item?.canonical_name}`);
+  assert(r.item?.available_variants?.length === 5, `Expected 5 Usna variants, got ${r.item?.available_variants?.length}`);
+  console.log('✅ Passed: Group alias "usna chawal" resolved to default variant (Baba) with 5 alternatives.');
+
+  // 8. Variant Group Default Resolution: "namak" -> default "Tata Salt 1kg"
+  r = await resolveItem('namak');
+  assert(r.status === 'ok', 'Group alias "namak" must resolve to ok');
+  assert(r.item?.canonical_name === 'Tata Salt 1kg', `Expected default "Tata Salt 1kg", got ${r.item?.canonical_name}`);
+  assert(r.item?.available_variants?.length === 2, `Expected 2 Salt variants, got ${r.item?.available_variants?.length}`);
+  console.log('✅ Passed: Group alias "namak" resolved to default variant (Tata Salt 1kg) with alternatives.');
+
+  // 9. Exact SKU Resolution for a variant: "baskathi" -> "Usna Chawal (Baskathi)"
+  r = await resolveItem('baskathi');
+  assert(r.status === 'ok', 'Specific SKU alias "baskathi" must resolve to ok');
+  assert(r.item?.canonical_name === 'Usna Chawal (Baskathi)', `Expected "Usna Chawal (Baskathi)", got ${r.item?.canonical_name}`);
+  assert(r.item?.current_price === 42, `Expected Rs 42, got ${r.item?.current_price}`);
+  assert(r.item?.available_variants?.length === 5, `Expected 5 Usna variants on SKU item, got ${r.item?.available_variants?.length}`);
+  console.log('✅ Passed: Specific variant "baskathi" resolved to Baskathi SKU with alternatives.');
+
   console.log('✅ All Item Resolver Tests Passed Successfully!');
 }
 

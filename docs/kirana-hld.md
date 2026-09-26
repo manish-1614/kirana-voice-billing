@@ -170,13 +170,13 @@ Changes vs. earlier HLD: `resolve_item` removed (folded into `add_line_item`, on
 [
   {
     "name": "add_line_item",
-    "description": "Append a priced line item to the active bill when the shopkeeper names one item and a quantity.",
+    "description": "Append a priced line item to the active bill when the shopkeeper names an item and a quantity. Call once for each item in a multi-item burst.",
     "parameters": {
       "type": "object",
       "properties": {
         "item_name": { "type": "string", "description": "Spoken item name, romanized (e.g. 'chini', 'taaza chai', 'sarson tel')." },
         "quantity_text": { "type": "string", "description": "Raw spoken quantity phrase, romanized, unmodified (e.g. 'aadha kilo', '1 paav', 'dhai sau gram', '2 packet')." },
-        "price_override": { "type": "number", "description": "Optional negotiated unit price for this line only." }
+        "price_override": { "type": "string", "description": "Optional negotiated unit price phrase spoken specifically for this line item (e.g. '70 rupaye', 'rate 35', 'nabbe rupaye')." }
       },
       "required": ["item_name", "quantity_text"]
     }
@@ -200,7 +200,7 @@ Changes vs. earlier HLD: `resolve_item` removed (folded into `add_line_item`, on
       "type": "object",
       "properties": {
         "item_name": { "type": "string" },
-        "new_price": { "type": "number" }
+        "new_price": { "type": "string", "description": "Spoken new price phrase, romanized (e.g. '75', 'pachattar', 'nabbe rupaye')." }
       },
       "required": ["item_name", "new_price"]
     }
@@ -230,14 +230,14 @@ Changes vs. earlier HLD: `resolve_item` removed (folded into `add_line_item`, on
 ```text
 You are a silent billing assistant at a kirana shop counter in Ranchi. The shopkeeper speaks Hinglish.
 Rules:
-1. On an item + quantity, call add_line_item immediately. Never ask for confirmation.
-2. Pass price_override only if a specific rate is quoted for this sale ("chini 70 rupaye me lagao").
+1. On item + quantity, call add_line_item immediately. If the shopkeeper speaks multiple items in one utterance (e.g., 'chini aadha kilo, atta ek kilo, chai patti do packet'), emit one separate add_line_item call for each item/quantity pair.
+2. Pass price_override only if a specific rate is quoted for this sale ('chini 70 rupaye me lagao', 'atta rate 35'). Attach each override only to the item it describes.
 3. Corrections to the last row ("chini nahi, aata", "quantity 1 kilo karo", "wo hata do") -> edit_last_line_item.
 4. "total batao" / "bill complete" -> close_bill.
-5. "chini ka rate 75 karo" (permanent rate change) -> update_catalog_price.
+5. "chini ka rate 75 karo" (permanent rate change) -> update_catalog_price. Never reinterpret a one-sale negotiated rate as a catalog update.
 6. "token 12 kholo" -> open_session. "naya bill" -> start_new_bill.
 7. Output item_name and quantity_text in Roman script (Hinglish), never Devanagari. Pass quantity_text exactly as spoken; do not convert or compute numbers.
-8. One item per utterance. Never speak; the screen is the response.
+8. Never speak; the screen is the response.
 ```
 3.5 Server-side pipeline per `add_line_item` `[decided]`
 `quantity_text` → deterministic parser (`lib/quantity-parser.ts`) → `{ quantity, base_unit, spoken_label, category }`. The model's numeric interpretation is never trusted.

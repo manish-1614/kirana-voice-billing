@@ -7,6 +7,13 @@
 
 import { CatalogUnitType } from './quantity-parser';
 
+export interface VariantGroup {
+  id: string;
+  group_name: string;
+  default_item_id: string;
+  aliases: string[];
+}
+
 export interface CatalogItem {
   id: string;
   canonical_name: string;
@@ -14,6 +21,7 @@ export interface CatalogItem {
   current_price: number;
   category: string;
   aliases: string[];
+  variant_group_id?: string;
 }
 
 export const SEED_CATALOG: CatalogItem[] = [
@@ -103,7 +111,8 @@ export const SEED_CATALOG: CatalogItem[] = [
     unit_type: 'packet',
     current_price: 28.0,
     category: 'Staples',
-    aliases: ['namak', 'tata salt', 'salt', 'tata namak', 'sada namak'],
+    variant_group_id: 'vg-namak',
+    aliases: ['tata salt', 'tata namak'],
   },
   {
     id: 'item-012',
@@ -147,11 +156,12 @@ export const SEED_CATALOG: CatalogItem[] = [
   },
   {
     id: 'item-017',
-    canonical_name: 'Usna Chawal',
+    canonical_name: 'Usna Chawal (Baba)',
     unit_type: 'kg',
     current_price: 36.0,
     category: 'Rice',
-    aliases: ['usna chawal', 'mota chawal', 'bhaat chawal', 'usna'],
+    variant_group_id: 'vg-usna',
+    aliases: ['baba chawal', 'baba usna', 'mansuri chawal', 'baba'],
   },
   {
     id: 'item-018',
@@ -217,4 +227,65 @@ export const SEED_CATALOG: CatalogItem[] = [
     category: 'Snacks',
     aliases: ['parle g', 'parle ji', 'biscuit', 'parle biscuit'],
   },
+  {
+    id: 'item-026',
+    canonical_name: 'Khula Namak (Loose Salt)',
+    unit_type: 'kg',
+    current_price: 15.0,
+    category: 'Staples',
+    variant_group_id: 'vg-namak',
+    aliases: ['khula namak', 'loose namak', 'local namak', 'loose salt'],
+  },
+  {
+    id: 'item-027',
+    canonical_name: 'Usna Chawal (Baskathi)',
+    unit_type: 'kg',
+    current_price: 42.0,
+    category: 'Rice',
+    variant_group_id: 'vg-usna',
+    aliases: ['baskathi', 'baskati', 'baskathi usna', 'baskathi chawal'],
+  },
+  {
+    id: 'item-028',
+    canonical_name: 'Usna Chawal (Minikit)',
+    unit_type: 'kg',
+    current_price: 38.0,
+    category: 'Rice',
+    variant_group_id: 'vg-usna',
+    aliases: ['minikit', 'minikit usna', 'minikit chawal'],
+  },
+  {
+    id: 'item-029',
+    canonical_name: 'Usna Chawal (Rashan)',
+    unit_type: 'kg',
+    current_price: 28.0,
+    category: 'Rice',
+    variant_group_id: 'vg-usna',
+    aliases: ['rashan chawal', 'ration chawal', 'sarkari chawal'],
+  },
+  {
+    id: 'item-030',
+    canonical_name: 'Usna Chawal (Jeerakathi)',
+    unit_type: 'kg',
+    current_price: 48.0,
+    category: 'Rice',
+    variant_group_id: 'vg-usna',
+    aliases: ['jeerakathi', 'jeera kathi'],
+  },
 ];
+
+export const VARIANT_GROUPS: VariantGroup[] = [
+  {
+    id: 'vg-usna',
+    group_name: 'Usna Chawal',
+    default_item_id: 'item-017', // Usna Chawal (Baba)
+    aliases: ['usna chawal', 'usna', 'mota chawal', 'bhaat chawal'],
+  },
+  {
+    id: 'vg-namak',
+    group_name: 'Namak',
+    default_item_id: 'item-011', // Tata Salt 1kg
+    aliases: ['namak', 'salt', 'sada namak'],
+  },
+];
+

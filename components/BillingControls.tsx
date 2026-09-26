@@ -143,16 +143,28 @@ export const BillingControls: React.FC<BillingControlsProps> = ({
                 : 'bg-slate-900 hover:bg-slate-800 text-white shadow-md hover:shadow-lg active:scale-[0.98]'
             }`}
           >
-            <div
-              className={`w-16 h-16 rounded-2xl flex items-center justify-center transition-all duration-200 ${
-                micState === 'listening'
-                  ? 'bg-white text-rose-600 shadow-inner'
-                  : micState === 'processing'
-                  ? 'bg-white text-amber-600 shadow-inner animate-spin'
-                  : 'bg-white/10 text-amber-400 group-hover:scale-105'
-              }`}
-            >
-              <Mic className="w-8 h-8 stroke-[2.25]" />
+            {/* Mic Glyph Container with separate, decorative processing background */}
+            <div className="relative flex items-center justify-center">
+              {/* Decorative processing-only background pulse (aria-hidden, pointer-events-none) */}
+              {micState === 'processing' && (
+                <div
+                  aria-hidden="true"
+                  className="absolute -inset-2.5 rounded-3xl bg-amber-400/40 blur-xs animate-processing-pulse pointer-events-none"
+                />
+              )}
+
+              {/* Mic Icon Wrapper - remains static in all states */}
+              <div
+                className={`w-16 h-16 rounded-2xl flex items-center justify-center transition-all duration-200 relative z-10 ${
+                  micState === 'listening'
+                    ? 'bg-white text-rose-600 shadow-inner'
+                    : micState === 'processing'
+                    ? 'bg-white text-amber-600 shadow-inner'
+                    : 'bg-white/10 text-amber-400 group-hover:scale-105'
+                }`}
+              >
+                <Mic className="w-8 h-8 stroke-[2.25]" />
+              </div>
             </div>
 
             <div className="space-y-1">

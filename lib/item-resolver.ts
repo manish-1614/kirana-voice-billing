@@ -11,8 +11,16 @@
  */
 
 import { CatalogUnitType } from './quantity-parser';
-import { SEED_CATALOG, CatalogItem } from './catalog-data';
+import { SEED_CATALOG, CatalogItem, VARIANT_GROUPS, VariantGroup } from './catalog-data';
 import { getServerSupabase } from './supabase/server';
+
+export interface ItemVariantSummary {
+  id: string;
+  canonical_name: string;
+  unit_type: CatalogUnitType;
+  current_price: number;
+  is_default?: boolean;
+}
 
 export interface ResolvedItem {
   id: string;
@@ -22,6 +30,9 @@ export interface ResolvedItem {
   matched_alias: string;
   similarity: number;
   is_exact: boolean;
+  variant_group_id?: string;
+  variant_group_name?: string;
+  available_variants?: ItemVariantSummary[];
 }
 
 export interface ResolveResult {
@@ -81,6 +92,87 @@ export function trigramSimilarity(str1: string, str2: string): number {
 }
 
 /**
+ * Enriches a resolved item with variant group metadata and available alternatives
+ */
+export function attachVariantInfo(item: ResolvedItem): ResolvedItem {
+  if (item.available_variants && item.available_variants.length > 0) {
+    return item;
+  }
+
+  const catalogItem = SEED_CATALOG.find(
+    (ci) => ci.id === item.id || ci.canonical_name.toLowerCase() === item.canonical_name.toLowerCase()
+  );
+  const groupId = catalogItem?.variant_group_id || item.variant_group_id;
+  if (!groupId) return item;
+
+  const group = VARIANT_GROUPS.find((g) => g.id === groupId);
+  if (!group) return item;
+
+  const variants: ItemVariantSummary[] = SEED_CATALOG
+    .filter((ci) => ci.variant_group_id === groupId)
+    .map((ci) => ({
+      id: ci.id,
+      canonical_name: ci.canonical_name,
+      unit_type: ci.unit_type,
+      current_price: ci.current_price,
+      is_default: ci.id === group.default_item_id,
+    }));
+
+  return {
+    ...item,
+    variant_group_id: group.id,
+    variant_group_name: group.group_name,
+    available_variants: variants,
+  };
+}
+
+/**
+ * Checks if query matches a variant group alias (e.g. "usna chawal", "namak")
+ * and resolves to its configured default variant item.
+ */
+function matchVariantGroup(query: string): ResolvedItem | null {
+  const cleanQuery = query.toLowerCase().trim();
+  const normalizedQuery = normalizeHinglish(cleanQuery);
+
+  for (const group of VARIANT_GROUPS) {
+    const matched = group.aliases.some((alias) => {
+      const cleanAlias = alias.toLowerCase().trim();
+      return cleanAlias === cleanQuery || normalizeHinglish(cleanAlias) === normalizedQuery;
+    });
+
+    if (matched) {
+      const defaultItem = SEED_CATALOG.find((i) => i.id === group.default_item_id);
+      if (defaultItem) {
+        const variants: ItemVariantSummary[] = SEED_CATALOG
+          .filter((ci) => ci.variant_group_id === group.id)
+          .map((ci) => ({
+            id: ci.id,
+            canonical_name: ci.canonical_name,
+            unit_type: ci.unit_type,
+            current_price: ci.current_price,
+            is_default: ci.id === group.default_item_id,
+          }));
+
+        return {
+          id: defaultItem.id,
+          canonical_name: defaultItem.canonical_name,
+          unit_type: defaultItem.unit_type,
+          current_price: defaultItem.current_price,
+          matched_alias: cleanQuery,
+          similarity: 1.0,
+          is_exact: true,
+          variant_group_id: group.id,
+          variant_group_name: group.group_name,
+          available_variants: variants,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Resolves a spoken item name to a catalog item using the tiered resolution pipeline.
  */
 export async function resolveItem(spokenText: string): Promise<ResolveResult> {
@@ -89,18 +181,68 @@ export async function resolveItem(spokenText: string): Promise<ResolveResult> {
     return { status: 'not_found', query: spokenText, source: 'in_memory_fallback' };
   }
 
+  const groupMatch = matchVariantGroup(cleanQuery);
   const supabase = getServerSupabase();
 
   // Path A: If live Supabase connection is available
   if (supabase) {
     try {
+      // Check group-level aliases first
+      const { data: dbGroupAlias } = await supabase
+        .from('variant_group_aliases')
+        .select('group_id, variant_groups(id, group_name, default_item_id)')
+        .ilike('alias_text', cleanQuery)
+        .maybeSingle();
+
+      const vg: any = dbGroupAlias ? (Array.isArray((dbGroupAlias as any).variant_groups) ? (dbGroupAlias as any).variant_groups[0] : (dbGroupAlias as any).variant_groups) : null;
+
+      if (vg?.default_item_id) {
+        const { data: defaultItem } = await supabase
+          .from('items')
+          .select('*')
+          .eq('id', vg.default_item_id)
+          .maybeSingle();
+
+        if (defaultItem) {
+          const { data: allVariants } = await supabase
+            .from('items')
+            .select('id, canonical_name, unit_type, current_price')
+            .eq('variant_group_id', dbGroupAlias!.group_id);
+
+          return {
+            status: 'ok',
+            item: {
+              id: defaultItem.id,
+              canonical_name: defaultItem.canonical_name,
+              unit_type: defaultItem.unit_type,
+              current_price: defaultItem.current_price,
+              matched_alias: cleanQuery,
+              similarity: 1.0,
+              is_exact: true,
+              variant_group_id: dbGroupAlias!.group_id,
+              variant_group_name: vg.group_name,
+              available_variants: (allVariants || []).map((v: any) => ({
+                ...v,
+                is_default: v.id === defaultItem.id,
+              })),
+            },
+            query: spokenText,
+            source: 'database',
+          };
+        }
+      }
+
       const { data, error } = await supabase.rpc('resolve_item_by_alias', {
         query_text: cleanQuery,
         similarity_threshold: 0.35,
       });
 
       if (!error && Array.isArray(data) && data.length > 0) {
-        return evaluateCandidates(data as ResolvedItem[], cleanQuery, 'database');
+        const evalRes = evaluateCandidates(data as ResolvedItem[], cleanQuery, 'database');
+        if (evalRes.status === 'ok' && evalRes.item) {
+          evalRes.item = attachVariantInfo(evalRes.item);
+        }
+        return evalRes;
       }
     } catch (err) {
       console.warn('[Resolver] Supabase RPC failed, using in-memory fallback:', err);
@@ -108,8 +250,43 @@ export async function resolveItem(spokenText: string): Promise<ResolveResult> {
   }
 
   // Path B: In-memory Mock Fallback using SEED_CATALOG
+  // Exact SKU match takes precedence
+  const exactSku = SEED_CATALOG.find((item) =>
+    item.aliases.some((a) => a.toLowerCase().trim() === cleanQuery)
+  );
+  if (exactSku) {
+    return {
+      status: 'ok',
+      item: attachVariantInfo({
+        id: exactSku.id,
+        canonical_name: exactSku.canonical_name,
+        unit_type: exactSku.unit_type,
+        current_price: exactSku.current_price,
+        matched_alias: cleanQuery,
+        similarity: 1.0,
+        is_exact: true,
+      }),
+      query: spokenText,
+      source: 'in_memory_fallback',
+    };
+  }
+
+  // Variant group alias match resolves to configured default variant
+  if (groupMatch) {
+    return {
+      status: 'ok',
+      item: groupMatch,
+      query: spokenText,
+      source: 'in_memory_fallback',
+    };
+  }
+
   const mockCandidates = resolveInMemory(cleanQuery);
-  return evaluateCandidates(mockCandidates, cleanQuery, 'in_memory_fallback');
+  const evalRes = evaluateCandidates(mockCandidates, cleanQuery, 'in_memory_fallback');
+  if (evalRes.status === 'ok' && evalRes.item) {
+    evalRes.item = attachVariantInfo(evalRes.item);
+  }
+  return evalRes;
 }
 
 /**

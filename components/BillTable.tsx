@@ -13,9 +13,19 @@ export interface BillItem {
   line_total: number;
   created_at: string;
   items?: {
+    id?: string;
     canonical_name: string;
     unit_type: string;
     current_price: number;
+    variant_group_id?: string;
+    variant_group_name?: string;
+    available_variants?: Array<{
+      id: string;
+      canonical_name: string;
+      unit_type: string;
+      current_price: number;
+      is_default?: boolean;
+    }>;
   };
 }
 
@@ -130,6 +140,17 @@ export const BillTable: React.FC<BillTableProps> = ({
                           <Tag className="w-2.5 h-2.5" />
                           Price Override
                         </span>
+                      )}
+
+                      {item.items?.variant_group_name && (
+                        <button
+                          type="button"
+                          onClick={() => onEditItem(item)}
+                          className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-sky-100 hover:bg-sky-200 text-sky-800 border border-sky-200 cursor-pointer transition-colors"
+                          title="Click to switch item variant"
+                        >
+                          <span>{item.items.variant_group_name}</span>
+                        </button>
                       )}
 
                       {isLast && (

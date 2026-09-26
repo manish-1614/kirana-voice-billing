@@ -35,9 +35,9 @@ screen — no typing, no manual lookup, no manual arithmetic.
 - Pre-roll ring buffer (~300ms) preserves the first syllable. On release, a 300ms tail is captured and the worklet is flushed with acknowledgment before signaling turn completion.
 - Non-blocking: releasing the mic immediately allows the next utterance while the previous one is processing. The server buffers audio during pending tool turns to prevent Gemini 1008 protocol errors and serializes database commits.
 - On recognizing an utterance like "chini aadha kilo": resolve item alias → canonical item → unit price → compute line total → **append as a new row instantly**, no confirmation step.
-- Pack-size conversion: when spoken quantity is weight/volume on a packaged SKU with `net_content` (e.g. "haldi 100 gram" on a 100g packet), deterministic conversion computes `n = spoken / net_content`. Integer multiples within ±1% convert to `n` packets. Non-multiples return `unit_mismatch`.
-- **One item per utterance** for v1. Multi-item utterances ("aadha kilo chini aur do packet Taaza") are explicitly deferred.
-- Pricing: default to the catalog's fixed per-unit rate. Support a **per-transaction override** — the shopkeeper can quote a custom negotiated rate that applies only to that line item in that bill, without touching the catalog price. Snapshot pricing at add-time.
+- **Multiple items per utterance**: Supports multi-item bursts in a single hold-to-talk press (e.g. "chini aadha kilo, atta ek kilo, chai patti do packet"). Gemini emits distinct `add_line_item` function calls, processed sequentially by the server with streamed client updates.
+- **Priced item variants**: Supports variant groups (e.g., Usna Chawal, Namak). Group aliases resolve to configured defaults with alternative variants selectable via the UI; specific SKU phrases resolve to exact variants.
+- Pricing: default to the catalog's fixed per-unit rate. Support a **per-transaction override** — the shopkeeper can quote a custom negotiated rate (spoken in Hindi/English/Hinglish) that applies only to that line item in that bill, without touching the catalog price. Snapshot pricing at add-time.
 
 \### 2.2 Corrections
 

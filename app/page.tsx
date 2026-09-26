@@ -181,7 +181,6 @@ export default function KiranaBillingApp() {
               }
 
               if (msg.status === 'ok') {
-                setAmbiguityState(null);
                 if (session?.sessionId) {
                   fetchSessionItems(session.sessionId);
                 }
@@ -452,7 +451,8 @@ export default function KiranaBillingApp() {
   const handleSaveItemEdit = async (
     id: string,
     newQuantityText?: string,
-    newPriceOverride?: number
+    newPriceOverride?: number,
+    newItemId?: string
   ) => {
     try {
       const res = await fetch('/api/session-items', {
@@ -461,7 +461,12 @@ export default function KiranaBillingApp() {
           'Content-Type': 'application/json',
           'x-shop-pin': shopPin,
         },
-        body: JSON.stringify({ id, quantityText: newQuantityText, priceOverride: newPriceOverride }),
+        body: JSON.stringify({
+          id,
+          quantityText: newQuantityText,
+          priceOverride: newPriceOverride,
+          itemId: newItemId,
+        }),
       });
       if (res.ok && session?.sessionId) {
         fetchSessionItems(session.sessionId);

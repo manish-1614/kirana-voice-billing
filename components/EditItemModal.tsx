@@ -5,7 +5,7 @@ import { BillItem } from './BillTable';
 interface EditItemModalProps {
   item: BillItem | null;
   onClose: () => void;
-  onSave: (id: string, newQuantityText?: string, newPriceOverride?: number) => Promise<void>;
+  onSave: (id: string, newQuantityText?: string, newPriceOverride?: number, newItemId?: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }
 
@@ -16,6 +16,11 @@ export const EditItemModal: React.FC<EditItemModalProps> = ({
   onDelete,
 }) => {
   if (!item) return null;
+
+  const variants = item.items?.available_variants || [];
+  const [selectedVariantId, setSelectedVariantId] = useState<string>(item.item_id);
+  const selectedVariant = variants.find((v) => v.id === selectedVariantId);
+  const currentCatalogPrice = selectedVariant?.current_price ?? item.items?.current_price ?? item.unit_price_used;
 
   const [quantityText, setQuantityText] = useState(item.spoken_quantity_label || `${item.quantity} ${item.unit}`);
   const [priceOverride, setPriceOverride] = useState<string>(
@@ -28,7 +33,12 @@ export const EditItemModal: React.FC<EditItemModalProps> = ({
     setSaving(true);
     try {
       const parsedPrice = priceOverride.trim() ? parseFloat(priceOverride) : undefined;
-      await onSave(item.id, quantityText.trim() || undefined, parsedPrice);
+      await onSave(
+        item.id,
+        quantityText.trim() || undefined,
+        parsedPrice,
+        selectedVariantId !== item.item_id ? selectedVariantId : undefined
+      );
       onClose();
     } finally {
       setSaving(false);
@@ -70,6 +80,52 @@ export const EditItemModal: React.FC<EditItemModalProps> = ({
         </div>
 
         <form onSubmit={handleSave} className="space-y-4">
+          {/* Variant Selection if available */}
+          {variants.length > 1 && (
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600">
+                  Select Variant / प्रकार बदलें
+                </label>
+                <span className="text-[11px] text-amber-700 font-bold">
+                  {variants.length} options available
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto p-0.5">
+                {variants.map((v) => {
+                  const isSelected = v.id === selectedVariantId;
+                  return (
+                    <button
+                      key={v.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedVariantId(v.id);
+                        setPriceOverride('');
+                      }}
+                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
+                        isSelected
+                          ? 'bg-amber-500/10 border-amber-500 text-amber-950 font-bold shadow-xs ring-1 ring-amber-500/30'
+                          : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100 font-medium'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-xs tracking-tight line-clamp-1">{v.canonical_name}</span>
+                        {v.is_default && (
+                          <span className="text-[9px] uppercase px-1 py-0.2 rounded bg-slate-200 text-slate-600 font-mono font-semibold shrink-0">
+                            Default
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-xs font-mono font-bold text-amber-700 mt-1">
+                        ₹{v.current_price}/{v.unit_type}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Quantity Input */}
           <div>
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1.5">
@@ -121,7 +177,7 @@ export const EditItemModal: React.FC<EditItemModalProps> = ({
                 Rate (Price Override)
               </label>
               <span className="text-xs text-slate-400 font-mono">
-                Catalog: ₹{item.items?.current_price || item.unit_price_used}/{unit}
+                Catalog: ₹{currentCatalogPrice}/{selectedVariant?.unit_type ?? unit}
               </span>
             </div>
             <div className="relative">

@@ -126,10 +126,51 @@ export async function runBridgeTests() {
   assert(hasActivityStart, 'Queued activityStart must be sent after tool turn');
   assert(hasMediaChunks, 'Queued media chunks must be sent after tool turn');
   assert(hasActivityEnd, 'Queued activityEnd must be sent after tool turn');
-  console.log('✅ Test 5 Passed: Overlapping speech safely queued and dispatched without 1008 error.');
+  // Test 6: Multiple tool calls in one turn and grouped response behavior
+  console.log('Testing Test 6: Multiple tool calls in one turn and grouped response...');
+  const geminiMsgCountBeforeBatch = mockGeminiWs.sentMessages.length;
+  const clientMsgCountBeforeBatch = mockClientWs.sentMessages.length;
+
+  // Simulate Gemini sending a batch of 2 function calls in one turn
+  mockGeminiWs.simulateIncoming({
+    toolCall: {
+      functionCalls: [
+        {
+          id: 'call_burst_1',
+          name: 'add_line_item',
+          args: { item_name: 'chini', quantity_text: '1 paav' },
+        },
+        {
+          id: 'call_burst_2',
+          name: 'add_line_item',
+          args: { item_name: 'aata', quantity_text: '1 kilo' },
+        },
+      ],
+    },
+  });
+
+  // Wait for queue promise to settle
+  await (bridge as any).toolExecutionQueue;
+
+  // Verify Gemini received exactly ONE toolResponse containing both functionResponses
+  const geminiNewMsgs = mockGeminiWs.sentMessages.slice(geminiMsgCountBeforeBatch).map((m) => JSON.parse(m));
+  const toolResponseMsgs = geminiNewMsgs.filter((m) => m.toolResponse !== undefined);
+  assert(toolResponseMsgs.length === 1, `Expected 1 grouped toolResponse, got ${toolResponseMsgs.length}`);
+  const fResponses = toolResponseMsgs[0].toolResponse.functionResponses;
+  assert(fResponses.length === 2, `Expected 2 functionResponses in grouped toolResponse, got ${fResponses.length}`);
+  assert(fResponses[0].id === 'call_burst_1', 'First response ID must match call_burst_1');
+  assert(fResponses[1].id === 'call_burst_2', 'Second response ID must match call_burst_2');
+
+  // Verify Client tablet received individual real-time updates for each item
+  const clientNewMsgs = mockClientWs.sentMessages.slice(clientMsgCountBeforeBatch).map((m) => JSON.parse(m));
+  const toolResultMsgs = clientNewMsgs.filter((m) => m.type === 'tool_result');
+  assert(toolResultMsgs.length === 2, `Expected 2 client tool_result events, got ${toolResultMsgs.length}`);
+  assert(toolResultMsgs[0].data?.canonical_name === 'Sugar (Chini)', 'First tool_result should be Sugar');
+  assert(toolResultMsgs[1].data?.canonical_name === 'Aashirvaad Atta', 'Second tool_result should be Atta');
+  console.log('✅ Test 6 Passed: Multi-item burst processed sequentially with grouped Gemini toolResponse.');
 
   bridge.destroy();
-  console.log('\n🎉 ALL 5 GEMINI LIVE BRIDGE TESTS PASSED SUCCESSFULLY!');
+  console.log('\n🎉 ALL 6 GEMINI LIVE BRIDGE TESTS PASSED SUCCESSFULLY!');
 }
 
 // Direct execution support
