@@ -17,11 +17,15 @@ class PcmDownsamplerProcessor extends AudioWorkletProcessor {
     this.bufferIndex = 0;
 
     this.port.onmessage = (event) => {
-      if (event.data === 'flush' && this.bufferIndex > 0) {
-        // Send whatever remaining audio is in the buffer
-        const remaining = this.buffer.slice(0, this.bufferIndex);
-        this.port.postMessage(remaining.buffer, [remaining.buffer]);
-        this.bufferIndex = 0;
+      if (event.data === 'flush') {
+        if (this.bufferIndex > 0) {
+          // Send whatever remaining audio is in the buffer
+          const remaining = this.buffer.slice(0, this.bufferIndex);
+          this.port.postMessage({ type: 'chunk', data: remaining.buffer }, [remaining.buffer]);
+          this.bufferIndex = 0;
+        }
+        // Acknowledge that worklet buffer is completely flushed
+        this.port.postMessage({ type: 'flushed' });
       }
     };
   }
@@ -57,7 +61,7 @@ class PcmDownsamplerProcessor extends AudioWorkletProcessor {
       // When buffer reaches 100ms, post chunk to main thread
       if (this.bufferIndex >= this.chunkSize) {
         const chunk = new Int16Array(this.buffer);
-        this.port.postMessage(chunk.buffer, [chunk.buffer]);
+        this.port.postMessage({ type: 'chunk', data: chunk.buffer }, [chunk.buffer]);
         this.buffer = new Int16Array(this.chunkSize);
         this.bufferIndex = 0;
       }

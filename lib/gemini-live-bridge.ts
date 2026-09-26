@@ -3,15 +3,17 @@
  * 
  * Bridges client-side PCM audio to Gemini Live API via server-to-server WebSocket.
  * 
- * Responsibilities:
+ * Key Responsibilities & Protocol Compliance:
  * 1. Establishes secure WebSocket connection with Gemini Live API v1alpha.
  * 2. Handshakes with Kirana billing system instructions and function tools (HLD §3.3-3.4).
- * 3. Streams 16kHz 16-bit linear PCM audio chunks (Hold-to-Talk) into Gemini Live.
- * 4. Intercepts tool calls (add_line_item, close_bill, etc.), dispatches to PostgreSQL,
- *    and immediately returns function responses to keep the Gemini turn alive.
- * 5. Safely suppresses model audio chunks (HLD §3.7: visual + earcon cues only, no TTS).
- * 6. Emits status and synthetic earcon cues ('chime', 'warning') to the client WebSocket.
- * 7. Measures and logs end-to-end latency breakdowns per utterance.
+ * 3. Manual Activity Signaling: Disables automatic VAD in setup message and signals explicit
+ *    turn boundaries via realtimeInput: { activityStart: {} } and realtimeInput: { activityEnd: {} }.
+ * 4. Protocol Guard & Queue: Buffers speech if user talks while a tool call is in-flight to prevent
+ *    fatal Gemini 1008 protocol errors; dispatches queued activity signals immediately upon tool response.
+ * 5. Serializes tool call executions sequentially via async promise chain.
+ * 6. Dispatches to PostgreSQL/Supabase and returns function responses to keep the Gemini turn alive.
+ * 7. Suppresses model audio chunks (HLD §3.7: earcon cues + visual DOM updates only, no TTS).
+ * 8. Measures and logs end-to-end latency breakdowns along with audio duration telemetry.
  */
 
 import WebSocket from 'ws';
@@ -28,6 +30,7 @@ export interface GeminiBridgeOptions {
   sessionContext: SessionContext;
   model?: string;
   onContextChange?: (updatedContext: SessionContext) => void;
+  geminiWs?: WebSocket;
 }
 
 export class GeminiLiveBridge {
@@ -37,11 +40,28 @@ export class GeminiLiveBridge {
   private model: string;
   private sessionContext: SessionContext;
   private onContextChange?: (updatedContext: SessionContext) => void;
+  private customGeminiWs?: WebSocket;
 
   private isGeminiReady = false;
   private isDestroyed = false;
   private utteranceStartTime = 0;
   private utteranceEndTime = 0;
+
+  // Telemetry diagnostics
+  private lastAudioMsSent = 0;
+  private lastPrerollMs = 0;
+
+  // Turn and concurrency management
+  private isToolTurnPending = false;
+  private isSpeechQueued = false;
+  private isSpeechEndQueued = false;
+  private queuedAudioChunks: Buffer[] = [];
+  private toolExecutionQueue: Promise<void> = Promise.resolve();
+
+  // Audio chunk buffer (~100ms chunks)
+  private audioChunks: Buffer[] = [];
+  private totalBufferedBytes = 0;
+  private readonly CHUNK_FLUSH_THRESHOLD = 3200; // 100ms of 16kHz 16-bit mono PCM
 
   constructor(options: GeminiBridgeOptions) {
     this.apiKey = options.apiKey;
@@ -49,6 +69,7 @@ export class GeminiLiveBridge {
     this.sessionContext = options.sessionContext;
     this.model = options.model || process.env.GEMINI_MODEL || 'models/gemini-2.5-flash-native-audio-latest';
     this.onContextChange = options.onContextChange;
+    this.customGeminiWs = options.geminiWs;
 
     this.connect();
   }
@@ -59,17 +80,25 @@ export class GeminiLiveBridge {
   private connect() {
     if (this.isDestroyed) return;
 
-    const host = 'generativelanguage.googleapis.com';
-    const apiVersion = 'v1alpha';
-    const wsUrl = `wss://${host}/ws/google.ai.generativelanguage.${apiVersion}.GenerativeService.BidiGenerateContent?key=${this.apiKey}`;
+    if (this.customGeminiWs) {
+      this.geminiWs = this.customGeminiWs;
+    } else {
+      const host = 'generativelanguage.googleapis.com';
+      const apiVersion = 'v1alpha';
+      const wsUrl = `wss://${host}/ws/google.ai.generativelanguage.${apiVersion}.GenerativeService.BidiGenerateContent?key=${this.apiKey}`;
 
-    console.log(`[Gemini Bridge] Connecting to Gemini Live (${this.model})...`);
-    this.geminiWs = new WebSocket(wsUrl);
+      console.log(`[Gemini Bridge] Connecting to Gemini Live (${this.model})...`);
+      this.geminiWs = new WebSocket(wsUrl);
+    }
 
-    this.geminiWs.on('open', () => {
-      console.log('[Gemini Bridge] ✅ Connected to Gemini Live API');
+    if (this.geminiWs.readyState === WebSocket.OPEN) {
       this.sendSetupMessage();
-    });
+    } else {
+      this.geminiWs.on('open', () => {
+        console.log('[Gemini Bridge] ✅ Connected to Gemini Live API');
+        this.sendSetupMessage();
+      });
+    }
 
     this.geminiWs.on('message', (data: Buffer | string) => {
       this.handleGeminiMessage(data);
@@ -96,7 +125,7 @@ export class GeminiLiveBridge {
   }
 
   /**
-   * Sends the initial setup handshake with tools and system instruction
+   * Sends initial setup handshake disabling server-side VAD (manual activity signaling per HLD §3.7)
    */
   private sendSetupMessage() {
     if (!this.geminiWs || this.geminiWs.readyState !== WebSocket.OPEN) return;
@@ -104,6 +133,11 @@ export class GeminiLiveBridge {
     const setupMessage = {
       setup: {
         model: this.model,
+        realtimeInputConfig: {
+          automaticActivityDetection: {
+            disabled: true,
+          },
+        },
         generationConfig: {
           // Native audio model requires AUDIO modality; audio output is suppressed server-side
           responseModalities: ['AUDIO'],
@@ -136,26 +170,28 @@ export class GeminiLiveBridge {
     };
 
     this.geminiWs.send(JSON.stringify(setupMessage));
-    console.log('[Gemini Bridge] Handshake setup sent with 6 function declarations.');
+    console.log('[Gemini Bridge] Handshake setup sent with automaticActivityDetection.disabled = true.');
   }
-
-  private audioChunks: Buffer[] = [];
-  private totalBufferedBytes = 0;
-  private readonly CHUNK_FLUSH_THRESHOLD = 3200; // 100ms of 16kHz 16-bit mono PCM
 
   /**
    * Forwards binary 16kHz PCM audio chunk from Hold-to-Talk to Gemini Live
    */
   public sendAudioChunk(pcmChunk: Buffer | ArrayBuffer | string) {
-    if (!this.geminiWs || this.geminiWs.readyState !== WebSocket.OPEN || !this.isGeminiReady) {
-      return;
-    }
-
     const buffer = Buffer.isBuffer(pcmChunk)
       ? pcmChunk
       : typeof pcmChunk === 'string'
       ? Buffer.from(pcmChunk)
       : Buffer.from(pcmChunk);
+
+    // If speech is queued due to an in-flight tool turn, buffer the chunk
+    if (this.isSpeechQueued) {
+      this.queuedAudioChunks.push(buffer);
+      return;
+    }
+
+    if (!this.geminiWs || this.geminiWs.readyState !== WebSocket.OPEN || !this.isGeminiReady) {
+      return;
+    }
 
     this.audioChunks.push(buffer);
     this.totalBufferedBytes += buffer.length;
@@ -191,37 +227,75 @@ export class GeminiLiveBridge {
   }
 
   /**
-   * Triggered when Hold-to-Talk button is pressed
+   * Triggered when Hold-to-Talk button is pressed:
+   * Sends explicit activityStart signal to Gemini Live per manual activity protocol
    */
   public startSpeech() {
     this.audioChunks = [];
     this.totalBufferedBytes = 0;
     this.utteranceStartTime = Date.now();
+
     this.notifyClient({
       type: 'status_change',
       status: 'listening',
     });
+
+    // Guard: Gemini Live protocol forbids activityStart while a tool call is pending (throws 1008)
+    if (this.isToolTurnPending) {
+      console.log('[Gemini Bridge] ⏳ Tool turn pending; queueing utterance start to prevent 1008 error.');
+      this.isSpeechQueued = true;
+      this.isSpeechEndQueued = false;
+      this.queuedAudioChunks = [];
+      return;
+    }
+
+    if (this.geminiWs && this.geminiWs.readyState === WebSocket.OPEN && this.isGeminiReady) {
+      const activityStartMessage = {
+        realtimeInput: {
+          activityStart: {},
+        },
+      };
+      this.geminiWs.send(JSON.stringify(activityStartMessage));
+      console.log('[Gemini Bridge] 🎙️ Speech started: Sent activityStart signal.');
+    }
   }
 
   /**
-   * Triggered when Hold-to-Talk button is released: signals turnComplete
+   * Triggered when Hold-to-Talk button is released:
+   * Sends explicit activityEnd signal to Gemini Live
    */
-  public stopSpeech() {
+  public stopSpeech(telemetry?: { audioMsSent?: number; prerollMs?: number }) {
     this.utteranceEndTime = Date.now();
     const duration = this.utteranceEndTime - (this.utteranceStartTime || this.utteranceEndTime);
 
-    // Flush any trailing audio samples
+    if (telemetry) {
+      this.lastAudioMsSent = telemetry.audioMsSent || 0;
+      this.lastPrerollMs = telemetry.prerollMs || 0;
+    }
+
+    // If this utterance was queued, mark end of speech on the queue
+    if (this.isSpeechQueued) {
+      console.log(`[Gemini Bridge] ⏳ Queued utterance release recorded (${duration}ms). Will dispatch after tool response.`);
+      this.isSpeechEndQueued = true;
+      this.notifyClient({
+        type: 'status_change',
+        status: 'processing',
+      });
+      return;
+    }
+
+    // Flush any remaining audio samples in local buffer
     this.flushAudio();
 
-    console.log(`[Gemini Bridge] Utterance finished (${duration}ms). Signaling turnComplete...`);
+    console.log(`[Gemini Bridge] 🛑 Utterance finished (${duration}ms | audioSent=${this.lastAudioMsSent}ms, preroll=${this.lastPrerollMs}ms). Sending activityEnd...`);
 
     if (this.geminiWs && this.geminiWs.readyState === WebSocket.OPEN && this.isGeminiReady) {
-      const turnCompleteMessage = {
-        clientContent: {
-          turnComplete: true,
+      const activityEndMessage = {
+        realtimeInput: {
+          activityEnd: {},
         },
       };
-      this.geminiWs.send(JSON.stringify(turnCompleteMessage));
+      this.geminiWs.send(JSON.stringify(activityEndMessage));
     }
 
     this.notifyClient({
@@ -292,36 +366,40 @@ export class GeminiLiveBridge {
 
       // 2. Function calls via top-level toolCall
       if (response.toolCall?.functionCalls) {
+        this.isToolTurnPending = true;
         for (const fc of response.toolCall.functionCalls) {
-          await this.executeAndRespondTool(fc.name, fc.args, fc.id);
+          // Serialize tool executions to maintain strict row order
+          this.toolExecutionQueue = this.toolExecutionQueue.then(() =>
+            this.executeAndRespondTool(fc.name, fc.args, fc.id)
+          );
         }
       }
 
       // 3. Server content (model turn)
       if (response.serverContent) {
-        // Discard any audio chunks (no TTS per HLD §3.7)
+        // Discard any model audio chunks (silent counter operation per HLD §3.7)
 
         const parts = response.serverContent.modelTurn?.parts || [];
         for (const part of parts) {
-          // Model text thoughts or reasoning
+          // Model text thoughts or reasoning: logged to server only, hidden from counter UI
           if (part.text) {
-            this.notifyClient({
-              type: 'ai_thought',
-              text: part.text,
-            });
+            console.log(`[Gemini Bridge] 💭 AI Thought: ${part.text.replace(/\n/g, ' ')}`);
           }
 
           // Check if function call arrived inside modelTurn
           if (part.functionCall) {
-            await this.executeAndRespondTool(
-              part.functionCall.name,
-              part.functionCall.args,
-              part.functionCall.id || `call_${Date.now()}`
+            this.isToolTurnPending = true;
+            this.toolExecutionQueue = this.toolExecutionQueue.then(() =>
+              this.executeAndRespondTool(
+                part.functionCall.name,
+                part.functionCall.args,
+                part.functionCall.id || `call_${Date.now()}`
+              )
             );
           }
         }
 
-        if (response.serverContent.turnComplete) {
+        if (response.serverContent.turnComplete && !this.isToolTurnPending && !this.isSpeechQueued) {
           this.notifyClient({
             type: 'status_change',
             status: 'ready',
@@ -334,7 +412,7 @@ export class GeminiLiveBridge {
   }
 
   /**
-   * Executes a tool call, measures latency, replies to Gemini, and notifies client
+   * Executes a tool call, replies to Gemini, notifies client, and dispatches any queued overlapping speech
    */
   private async executeAndRespondTool(toolName: string, args: any, callId: string) {
     const toolStartTime = Date.now();
@@ -360,7 +438,7 @@ export class GeminiLiveBridge {
     const dbLatency = dbCommitTime - toolStartTime;
     const totalLatency = this.utteranceEndTime ? (dbCommitTime - this.utteranceEndTime) : dbLatency;
 
-    console.log(`[Gemini Bridge] 💾 Tool Result [${result.status}] in ${dbLatency}ms (Total: ${totalLatency}ms):`);
+    console.log(`[Gemini Bridge] 💾 Tool Result [${result.status}] in ${dbLatency}ms (Total: ${totalLatency}ms | AudioSent: ${this.lastAudioMsSent}ms, PreRoll: ${this.lastPrerollMs}ms):`);
     console.log(`   Message: ${result.message || ''}`);
     console.log(`   Earcon:  ${result.earcon}`);
 
@@ -396,6 +474,9 @@ export class GeminiLiveBridge {
       this.geminiWs.send(JSON.stringify(toolResponseMsg));
     }
 
+    // Mark tool turn completed
+    this.isToolTurnPending = false;
+
     // 2. Notify the client tablet with status, earcon cue, and latency metrics
     this.notifyClient({
       type: 'tool_result',
@@ -412,7 +493,61 @@ export class GeminiLiveBridge {
         dbCommitMs: dbLatency,
         totalMs: totalLatency,
       },
+      telemetry: {
+        audioMsSent: this.lastAudioMsSent,
+        prerollMs: this.lastPrerollMs,
+      },
     });
+
+    // 3. Process any queued speech that arrived while this tool call was in flight
+    this.dispatchQueuedSpeechIfAny();
+  }
+
+  /**
+   * Dispatches queued speech signals and buffered audio once tool response is safely sent
+   */
+  private dispatchQueuedSpeechIfAny() {
+    if (!this.isSpeechQueued || !this.geminiWs || this.geminiWs.readyState !== WebSocket.OPEN || !this.isGeminiReady) {
+      return;
+    }
+
+    console.log(`[Gemini Bridge] 🚀 Dispatched queued speech after tool turn. Flushing ${this.queuedAudioChunks.length} chunks.`);
+
+    // 1. Send activityStart
+    this.geminiWs.send(JSON.stringify({
+      realtimeInput: {
+        activityStart: {},
+      },
+    }));
+
+    // 2. Stream all buffered media chunks
+    if (this.queuedAudioChunks.length > 0) {
+      const combined = Buffer.concat(this.queuedAudioChunks);
+      this.queuedAudioChunks = [];
+      this.geminiWs.send(JSON.stringify({
+        realtimeInput: {
+          mediaChunks: [
+            {
+              mimeType: 'audio/pcm;rate=16000',
+              data: combined.toString('base64'),
+            },
+          ],
+        },
+      }));
+    }
+
+    this.isSpeechQueued = false;
+
+    // 3. If the user already released while queued, send activityEnd immediately
+    if (this.isSpeechEndQueued) {
+      this.geminiWs.send(JSON.stringify({
+        realtimeInput: {
+          activityEnd: {},
+        },
+      }));
+      this.isSpeechEndQueued = false;
+      console.log('[Gemini Bridge] 🛑 Sent queued activityEnd signal.');
+    }
   }
 
   private formatDetectedSpeech(toolName: string, args: any): string {

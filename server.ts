@@ -135,9 +135,12 @@ app.prepare().then(() => {
                 break;
 
               case 'mic_stop':
-                console.log('[WS] Hold-to-Talk released (speech ended)');
+                console.log(`[WS] Hold-to-Talk released (speech ended). Audio sent: ${msg.audioMsSent || 0}ms (preroll: ${msg.prerollMs || 0}ms)`);
                 if (bridge) {
-                  bridge.stopSpeech();
+                  bridge.stopSpeech({
+                    audioMsSent: msg.audioMsSent,
+                    prerollMs: msg.prerollMs,
+                  });
                 }
                 break;
 

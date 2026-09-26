@@ -685,6 +685,29 @@ async function handleCloseBill(context: SessionContext, supabase: any): Promise<
     };
   }
 
+  // Idempotency: if session is already closed, return ok with existing subtotal
+  if (context.status === 'closed') {
+    let existingSubtotal = 0.00;
+    if (supabase) {
+      const { data: closedSession } = await supabase
+        .from('sessions')
+        .select('subtotal')
+        .eq('id', context.sessionId)
+        .single();
+      if (closedSession) existingSubtotal = closedSession.subtotal;
+    }
+    return {
+      status: 'ok',
+      message: `Bill is already closed. Total: Rs ${existingSubtotal}`,
+      earcon: 'chime',
+      data: {
+        session_id: context.sessionId,
+        subtotal: existingSubtotal,
+        status: 'closed',
+      },
+    };
+  }
+
   let subtotal = 0.00;
 
   if (supabase) {

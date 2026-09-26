@@ -1,5 +1,5 @@
 import React from 'react';
-import { HelpCircle, AlertTriangle, Check, X } from 'lucide-react';
+import { HelpCircle, AlertTriangle, AlertOctagon, X, ArrowRight } from 'lucide-react';
 
 export interface AmbiguityState {
   type: 'ambiguous' | 'not_found' | 'unit_mismatch';
@@ -29,63 +29,80 @@ export const AmbiguityBanner: React.FC<AmbiguityBannerProps> = ({
 
   return (
     <div
-      className={`rounded-2xl p-4 border shadow-sm transition-all animate-in fade-in slide-in-from-top-2 duration-200 ${
+      className={`rounded-3xl p-5 border shadow-md transition-all animate-in fade-in slide-in-from-top-2 duration-200 ${
         state.type === 'ambiguous'
-          ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+          ? 'bg-gradient-to-r from-amber-50 to-orange-50/50 border-amber-300/80 text-amber-950 shadow-amber-500/5'
           : state.type === 'unit_mismatch'
-          ? 'bg-rose-50/90 border-rose-300 text-rose-950'
-          : 'bg-slate-100 border-slate-300 text-slate-900'
+          ? 'bg-gradient-to-r from-rose-50 to-pink-50/50 border-rose-300/80 text-rose-950 shadow-rose-500/5'
+          : 'bg-gradient-to-r from-slate-100 to-zinc-100 border-slate-300 text-slate-900 shadow-slate-500/5'
       }`}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
+        <div className="flex items-start gap-3.5 min-w-0">
           <div
-            className={`p-2 rounded-xl mt-0.5 ${
+            className={`p-2.5 rounded-2xl shrink-0 mt-0.5 shadow-xs ${
               state.type === 'ambiguous'
-                ? 'bg-amber-200/60 text-amber-800'
+                ? 'bg-amber-200/80 text-amber-900 border border-amber-300'
                 : state.type === 'unit_mismatch'
-                ? 'bg-rose-200/60 text-rose-800'
-                : 'bg-slate-200 text-slate-700'
+                ? 'bg-rose-200/80 text-rose-900 border border-rose-300'
+                : 'bg-slate-200 text-slate-800 border border-slate-300'
             }`}
           >
             {state.type === 'unit_mismatch' ? (
-              <AlertTriangle className="w-5 h-5" />
+              <AlertTriangle className="w-5 h-5 stroke-[2.25]" />
+            ) : state.type === 'ambiguous' ? (
+              <HelpCircle className="w-5 h-5 stroke-[2.25]" />
             ) : (
-              <HelpCircle className="w-5 h-5" />
+              <AlertOctagon className="w-5 h-5 stroke-[2.25]" />
             )}
           </div>
 
-          <div>
-            <div className="flex items-center gap-2">
-              <h4 className="text-sm font-bold tracking-tight">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h4 className="text-sm sm:text-base font-black tracking-tight">
                 {state.type === 'ambiguous'
-                  ? 'Which item did you mean?'
+                  ? 'Multiple Items Found / कौन सा सामान चाहिए?'
                   : state.type === 'unit_mismatch'
-                  ? 'Unit Mismatch'
-                  : 'Unrecognized Item'}
+                  ? 'Unit Mismatch / माप में अंतर'
+                  : 'Unrecognized Item / सामान सूची में नहीं मिला'}
               </h4>
               {state.query && (
-                <span className="text-xs font-mono font-semibold px-2 py-0.5 rounded bg-black/5 text-black/80">
+                <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-lg bg-black/10 text-black/90">
                   &ldquo;{state.query}&rdquo;
                 </span>
               )}
             </div>
-            <p className="text-xs text-black/70 mt-0.5 font-medium">{state.message}</p>
+            <p className="text-xs sm:text-sm text-black/75 mt-1 font-medium leading-relaxed">
+              {state.message}
+            </p>
 
-            {/* Candidate Quick Selection Chips */}
+            {/* Candidate Selection Buttons with Numeric Hotkeys */}
             {state.candidates && state.candidates.length > 0 && (
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <span className="text-xs font-semibold text-black/60">Tap to select:</span>
-                {state.candidates.map((cand) => (
-                  <button
-                    key={cand.id}
-                    onClick={() => onSelectCandidate(cand.canonical_name)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-amber-100/90 border border-amber-300 text-xs font-bold text-slate-900 shadow-xs hover:shadow-sm transition-all active:scale-95"
-                  >
-                    <span>{cand.canonical_name}</span>
-                    <span className="text-amber-800 font-mono">₹{cand.current_price}/{cand.unit_type}</span>
-                  </button>
-                ))}
+              <div className="mt-3.5 space-y-2">
+                <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-black/60">
+                  <span>Press number key [1-9] or tap to pick:</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {state.candidates.map((cand, idx) => (
+                    <button
+                      key={cand.id}
+                      type="button"
+                      onClick={() => onSelectCandidate(cand.canonical_name)}
+                      className="group inline-flex items-center gap-2.5 px-3.5 py-2.5 rounded-2xl bg-white hover:bg-amber-100 border border-amber-300/90 text-slate-900 shadow-xs hover:shadow-md transition-all active:scale-95 text-left"
+                    >
+                      {/* Number shortcut key badge */}
+                      <kbd className="w-5 h-5 rounded-md bg-amber-500 text-slate-950 font-mono font-black text-xs flex items-center justify-center shadow-2xs group-hover:scale-105 transition-transform">
+                        {idx + 1}
+                      </kbd>
+                      <span className="text-xs sm:text-sm font-bold tracking-tight">
+                        {cand.canonical_name}
+                      </span>
+                      <span className="text-xs text-amber-900 font-mono font-bold pl-1 border-l border-amber-200">
+                        ₹{cand.current_price}/{cand.unit_type}
+                      </span>
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -93,8 +110,8 @@ export const AmbiguityBanner: React.FC<AmbiguityBannerProps> = ({
 
         <button
           onClick={onDismiss}
-          className="p-1 rounded-lg text-black/40 hover:text-black/80 hover:bg-black/5 transition-colors"
-          title="Dismiss"
+          className="p-2 rounded-xl text-black/50 hover:text-black hover:bg-black/10 transition-colors shrink-0 active:scale-90"
+          title="Dismiss warning [Esc]"
         >
           <X className="w-4 h-4" />
         </button>

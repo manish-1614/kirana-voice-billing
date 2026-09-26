@@ -49,6 +49,11 @@ export default function KiranaBillingApp() {
       const savedPin = localStorage.getItem('KIRANA_SHOP_PIN') || '1234';
       setShopPin(savedPin);
     }
+
+    return () => {
+      recorderRef.current?.destroy();
+      recorderRef.current = null;
+    };
   }, []);
 
   // Fetch session items
@@ -139,9 +144,7 @@ export default function KiranaBillingApp() {
               break;
 
             case 'ai_thought':
-              if (msg.text) {
-                setLastAiThought(msg.text);
-              }
+              // HLD §3.7: Hide model thought text from operator UI status bar (preserved in server logs only)
               break;
 
             case 'tool_result':
@@ -288,9 +291,12 @@ export default function KiranaBillingApp() {
     };
   }, [session?.sessionId, fetchSessionItems]);
 
+  const isPressingMic = useRef<boolean>(false);
+
   // Audio Recording (Hold-to-Talk)
   const startRecording = useCallback(async () => {
-    if (micState === 'listening' || micState === 'processing') return;
+    if (isPressingMic.current) return;
+    isPressingMic.current = true;
 
     try {
       playEarcon('start');
@@ -301,7 +307,7 @@ export default function KiranaBillingApp() {
         wsRef.current.send(JSON.stringify({ type: 'mic_start' }));
       }
 
-      // Start Web Audio recorder
+      // Warm Web Audio recorder
       if (!recorderRef.current) {
         recorderRef.current = new PcmAudioRecorder();
       }
@@ -317,44 +323,111 @@ export default function KiranaBillingApp() {
       );
     } catch (err: any) {
       console.error('[Mic] Failed to start audio recording:', err);
+      isPressingMic.current = false;
       setMicState('idle');
       playEarcon('warning');
     }
-  }, [micState]);
+  }, []);
 
-  const stopRecording = useCallback(() => {
-    if (micState !== 'listening') return;
+  const stopRecording = useCallback(async () => {
+    if (!isPressingMic.current) return;
+    isPressingMic.current = false;
 
     try {
       playEarcon('stop');
       setMicState('processing');
 
-      // Stop recorder
+      let telemetry = { audioMsSent: 0, prerollMs: 0 };
+      // Stop recorder: captures 300ms tail, flushes worklet, awaits flush ack
       if (recorderRef.current) {
-        recorderRef.current.stop();
+        telemetry = await recorderRef.current.stop();
       }
 
-      // Send speech stop signal to server
+      // Send speech stop signal to server with audio telemetry
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'mic_stop' }));
+        wsRef.current.send(JSON.stringify({
+          type: 'mic_stop',
+          audioMsSent: telemetry.audioMsSent,
+          prerollMs: telemetry.prerollMs,
+        }));
       }
     } catch (err) {
       console.error('[Mic] Error stopping recorder:', err);
       setMicState('idle');
     }
-  }, [micState]);
+  }, []);
 
-  // Spacebar Hotkey support for Counter Keyboard
+  // Bill Actions
+  const handleCloseBill = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'user_text', text: 'total batao' }));
+    }
+  }, []);
+
+  const handleStartNewBill = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'start_new_bill' }));
+    }
+  }, []);
+
+  const handleSendTextPrompt = useCallback((text: string) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'user_text', text }));
+    }
+  }, []);
+
+  const handleCandidateSelect = useCallback((candidateName: string) => {
+    handleSendTextPrompt(`${candidateName} 1`);
+  }, [handleSendTextPrompt]);
+
+  // Keyboard Hotkey support for Counter Keyboard (Spacebar, T, N, Esc, 1-9)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Ignore if user is currently typing in an input
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
         return;
       }
+
+      // Spacebar: Hold-to-Talk
       if (e.code === 'Space' && !e.repeat && !isHoldingSpacebar.current) {
         e.preventDefault();
         isHoldingSpacebar.current = true;
         startRecording();
+        return;
+      }
+
+      // 'T' / 't': Close bill / Total batao
+      if ((e.key === 't' || e.key === 'T') && !e.repeat) {
+        e.preventDefault();
+        handleCloseBill();
+        return;
+      }
+
+      // 'N' / 'n': Start new bill token
+      if ((e.key === 'n' || e.key === 'N') && !e.repeat) {
+        e.preventDefault();
+        handleStartNewBill();
+        return;
+      }
+
+      // 'Escape': Clear ambiguity/unrecognized banner
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setAmbiguityState(null);
+        return;
+      }
+
+      // Digit 1-9: Quick selection of ambiguity candidates
+      if (ambiguityState?.candidates && ambiguityState.candidates.length > 0) {
+        const num = parseInt(e.key, 10);
+        if (!isNaN(num) && num >= 1 && num <= ambiguityState.candidates.length) {
+          e.preventDefault();
+          const selected = ambiguityState.candidates[num - 1];
+          if (selected) {
+            handleCandidateSelect(selected.canonical_name);
+          }
+          return;
+        }
       }
     };
 
@@ -373,30 +446,7 @@ export default function KiranaBillingApp() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [startRecording, stopRecording]);
-
-  // Bill Actions
-  const handleCloseBill = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'user_text', text: 'total batao' }));
-    }
-  };
-
-  const handleStartNewBill = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'start_new_bill' }));
-    }
-  };
-
-  const handleSendTextPrompt = (text: string) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'user_text', text }));
-    }
-  };
-
-  const handleCandidateSelect = (candidateName: string) => {
-    handleSendTextPrompt(`${candidateName} 1`);
-  };
+  }, [startRecording, stopRecording, handleCloseBill, handleStartNewBill, handleCandidateSelect, ambiguityState]);
 
   // Row Edit & Delete
   const handleSaveItemEdit = async (
@@ -496,6 +546,7 @@ export default function KiranaBillingApp() {
               itemsCount={items.length}
               subtotal={subtotal}
               micState={micState}
+              volumeLevel={volumeLevel}
               onStartRecording={startRecording}
               onStopRecording={stopRecording}
               onCloseBill={handleCloseBill}

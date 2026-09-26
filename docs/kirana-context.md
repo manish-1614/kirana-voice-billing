@@ -31,31 +31,13 @@ screen — no typing, no manual lookup, no manual arithmetic.
 
 \### 2.1 Item entry
 
-\- Trigger: explicit \*\*start/stop billing\*\* command (voice phrase or button) opens/closes
-
-&#x20; a listening session — not always-listening. Push-to-talk-less mode is an explicit
-
-&#x20; \*\*Phase 2\*\* enhancement, not initial scope.
-
-\- On recognizing an utterance like "chini aadha kilo": resolve item alias → canonical
-
-&#x20; item → unit price → compute line total → \*\*append as a new row instantly\*\*, no
-
-&#x20; confirmation step. Optimize for speed; tolerate occasional ASR misses since
-
-&#x20; correction is fast (see below).
-
-\- \*\*One item per utterance\*\* for v1. Multi-item utterances ("aadha kilo chini aur do
-
-&#x20; packet Taaza") are explicitly deferred.
-
-\- Pricing: default to the catalog's fixed per-unit rate. Support a \*\*per-transaction
-
-&#x20; override\*\* — the shopkeeper can quote a custom negotiated rate that applies only to
-
-&#x20; that line item in that bill, without touching the catalog price.
-
-
+- Trigger: **Hold-to-Talk** (on-screen button or Spacebar). The audio pipeline (mic + AudioContext + worklet) is acquired once on the first gesture and kept warm; audio chunk streaming is gated on press/release without tearing down the audio graph.
+- Pre-roll ring buffer (~300ms) preserves the first syllable. On release, a 300ms tail is captured and the worklet is flushed with acknowledgment before signaling turn completion.
+- Non-blocking: releasing the mic immediately allows the next utterance while the previous one is processing. The server buffers audio during pending tool turns to prevent Gemini 1008 protocol errors and serializes database commits.
+- On recognizing an utterance like "chini aadha kilo": resolve item alias → canonical item → unit price → compute line total → **append as a new row instantly**, no confirmation step.
+- Pack-size conversion: when spoken quantity is weight/volume on a packaged SKU with `net_content` (e.g. "haldi 100 gram" on a 100g packet), deterministic conversion computes `n = spoken / net_content`. Integer multiples within ±1% convert to `n` packets. Non-multiples return `unit_mismatch`.
+- **One item per utterance** for v1. Multi-item utterances ("aadha kilo chini aur do packet Taaza") are explicitly deferred.
+- Pricing: default to the catalog's fixed per-unit rate. Support a **per-transaction override** — the shopkeeper can quote a custom negotiated rate that applies only to that line item in that bill, without touching the catalog price. Snapshot pricing at add-time.
 
 \### 2.2 Corrections
 
@@ -67,25 +49,14 @@ screen — no typing, no manual lookup, no manual arithmetic.
 
 &#x20; voice command needs to reach back further than the last row.
 
-
-
 \### 2.3 Sessions
 
-\- Each customer = one session, identified by a \*\*customer/session number\*\*.
-
-\- Sessions are \*\*resumable\*\*: a bill marked "done" can be reopened if the same
-
-&#x20; customer asks for more items shortly after. Don't treat bill-closed as
-
-&#x20; session-deleted — keep it addressable until a new session explicitly starts.
-
-
+- Each customer = one session, identified by an **atomic daily sequential token** (Asia/Kolkata timezone, resetting at local midnight), not a manually typed customer phone/number.
+- Sessions are **resumable**: a bill marked "closed" can be reopened if the same customer asks for more items shortly after. Don't treat bill-closed as session-deleted — keep it addressable until a new session explicitly starts.
 
 \### 2.4 Closing a bill
 
-\- Support \*\*both\*\*: a spoken command ("total batao" / "bill complete") and a manual
-
-&#x20; button tap. Either should compute and display the final total.
+- Support **both**: a spoken command ("total batao" / "bill complete") and a manual button tap. Either computes and displays the final total. `close_bill` is idempotent on already-closed sessions.
 
 
 
@@ -103,39 +74,21 @@ screen — no typing, no manual lookup, no manual arithmetic.
 
 \### 3.2 Unit types
 
-\- Two item classes, each stored with \*\*its own unit type and price basis\*\*:
+\- Two item classes, each stored with **its own unit type and price basis**:
+  - **Loose/weight-based** (sugar, atta, dal, etc.) — priced per kg, sold in fractional/variable weights.
+  - **Fixed-count packaged** (tea packets, biscuits, soap, etc.) — priced per piece/packet, sold in whole units.
+- **Pack Sizes (`net_content`, `net_content_unit`)**: Packaged items store their net weight/volume content (e.g. 100g, 500g, 1000g, 250ml) to enable deterministic weight-to-packet conversions without model guesswork.
 
-&#x20; - \*\*Loose/weight-based\*\* (sugar, atta, dal, etc.) — priced per kg, sold in
+### 3.3 Aliases & language
 
-&#x20;   fractional/variable weights.
-
-&#x20; - \*\*Fixed-count packaged\*\* (tea packets, biscuits, soap, etc.) — priced per
-
-&#x20;   piece/packet, sold in whole units.
-
-\- Catalog schema must not assume a single unit type across all items.
-
-
-
-\### 3.3 Aliases \& language
-
-\- Spoken language is \*\*Hinglish\*\* (mixed Hindi/English), not pure Hindi or pure
-
-&#x20; English. Design the parsing grammar around this from the start, not as a
-
-&#x20; translation layer bolted on later.
-
-\- \*\*No pre-built alias list\*\* — aliases ("chini"/"cheeni"/"sugar" → Sugar; "taaza" →
-
-&#x20; a specific tea brand) are added \*\*iteratively as ASR misses come up\*\* in real use.
-
-&#x20; The system should make it trivially easy to add a new alias to an existing item
-
-&#x20; (ideally from the correction flow itself — "that was actually X" should be able to
-
-&#x20; feed the alias table).
-
-\- \*\*Colloquial quantity units\*\* are in active use and must be parsed, not just
+- Spoken language is **Hinglish** (mixed Hindi/English), not pure Hindi or pure English.
+- **Iterative Alias Learning & Unrecognized Item Flow**:
+  - On unrecognized items (`not_found`), the server preserves the pending utterance in session context memory.
+  - The UI presents an inline 3-action card within `AmbiguityBanner`:
+    1. **Same as existing item**: Top-3 fuzzy suggestions + search box. On selection, maps alias → item, prompts confirmation on conflict, shows a 5-second undo toast, and auto-replays the line.
+    2. **Add as new item**: Prefilled form with spoken name and suggested unit; requires current price and pack size if packaged; creates item + alias and auto-replays the line.
+    3. **Ignore**: Discards the pending utterance.
+- **Colloquial quantity units** are in active use and parsed deterministically:
 
 &#x20; standard kg/g/piece:
 
@@ -163,15 +116,7 @@ screen — no typing, no manual lookup, no manual arithmetic.
 
 &#x20; resolve the item alias and \*\*write directly to the catalog's current price\*\*.
 
-\- \*\*Apply immediately, including to in-progress bills\*\* — if a bill has a sugar line
-
-&#x20; item already added and the price changes mid-session, the update should be
-
-&#x20; reflected (not just for future line items). Confirm exact expected UX for this with
-
-&#x20; Manish before building — e.g., does it recompute an already-added line's total, or
-
-&#x20; only affect items added after the update?
+- **Snapshot at add-time**: Catalog price applies to lines added after the update; existing lines keep their add-time price (snapshot). Correct an earlier line via voice (last row) or tap.
 
 \- \*\*Retain price-change history\*\* (item, old price, new price, timestamp) — an audit
 
@@ -188,44 +133,28 @@ screen — no typing, no manual lookup, no manual arithmetic.
 
 
 items
+id, canonical_name, unit_type ('kg' | 'piece' | 'litre' | ...),
+current_price, category (optional),
+net_content numeric(10,3) null, net_content_unit ('g' | 'ml') null,
+created_at
 
-id, canonical\_name, unit\_type ('kg' | 'piece' | 'litre' | ...),
+item_aliases
+item_id (fk), alias_text, created_at
+-- supports "chini"/"cheeni"/"sugar" → same item_id
+-- grows iteratively as ASR misses are corrected / learned
 
-current\_price, category (optional), created\_at
-
-
-
-item\_aliases
-
-item\_id (fk), alias\_text, created\_at
-
-\-- supports "chini"/"cheeni"/"sugar" → same item\_id
-
-\-- grows iteratively as ASR misses are corrected
-
-
-
-price\_history
-
-item\_id (fk), old\_price, new\_price, changed\_at
-
-
+price_history
+item_id (fk), old_price, new_price, changed_at
 
 sessions (customer bills)
+id, session_date (date in Asia/Kolkata), customer_number (atomic daily token),
+status ('open' | 'closed' | 'resumed'), subtotal, created_at, closed_at
 
-id, customer\_number, status ('open' | 'closed' | 'resumed'),
-
-created\_at, closed\_at
-
-
-
-session\_items (bill line items)
-
-session\_id (fk), item\_id (fk), quantity, unit,
-
-unit\_price\_used (catalog price OR negotiated override),
-
-is\_price\_override (bool), line\_total, created\_at
+session_items (bill line items)
+session_id (fk), item_id (fk), quantity, unit,
+spoken_quantity_label (text, e.g. "1 paav", "100g = 1 packet"),
+unit_price_used (catalog price OR negotiated override, immutable snapshot),
+is_price_override (bool), line_total, created_at
 
 
 
@@ -293,102 +222,38 @@ is\_price\_override (bool), line\_total, created\_at
 \- \*\*Public repo:\*\* https://github.com/manish-1614/kirana-voice-billing.git
 
 
-\- \*\*Function-calling tools\*\* (server-to-server pattern, backend proxies the Live
+- **Function-calling tools** (server-to-server pattern, backend proxies the Live WebSocket — session binding is managed server-side):
+  - `add_line_item(item_name, quantity_text, price_override?)` — resolves item via tiered matching, runs deterministic quantity & pack-size parser, snapshots price, inserts row into `session_items`.
+  - `edit_last_line_item(correction_type, new_value?)` — voice-driven correction or deletion of the most recent row on the active bill.
+  - `update_catalog_price(item_name, new_price)` — writes to `items.current_price` and logs audit row to `price_history`.
+  - `close_bill()` — idempotent bill closure; computes final total, marks session closed.
+  - `open_session(token_number)` — switches to / reopens a customer session by today's sequential token.
+  - `start_new_bill()` — starts the next customer token atomically.
+- **Response modality**: Silent DOM update + Web Audio earcons ('chime' on success, 'warning' on mismatch/miss). Gemini TTS audio is suppressed server-side.
+- **Turn Signaling & Audio**: Manual activity signaling (`realtimeInput.activityStart` / `realtimeInput.activityEnd` with `automaticActivityDetection.disabled = true`). Single warm audio stream with ~300ms pre-roll ring buffer and 300ms release tail. Server queues overlapping utterances during tool calls to prevent Gemini 1008 protocol errors.
 
-&#x20; WebSocket — keep API keys server-side, consistent with prior project security
+## 8. Platform Sequencing
 
-&#x20; posture):
+- **Phase 1 — Web app**: fast prototyping step, not the long-term target. Build for functional validation across devices (tablet + phone browser) rather than investing heavily in PWA/offline polish.
+- **Phase 2 — Android app**: the real intended target platform, reusing the same Supabase backend and Gemini Live integration built in Phase 1.
 
-&#x20; - `resolve\_item(spoken\_text) → {item\_id, canonical\_name, unit\_type, current\_price}`
+## 9. Explicitly Out of Scope (v1)
 
-&#x20;   — fuzzy-matches against `item\_aliases` (pg\_trgm), falls back to "not found" so the
-
-&#x20;   UI can prompt for a new alias mapping.
-
-&#x20; - `add\_line\_item(session\_id, item\_id, quantity, unit, price\_override?) → line\_total`
-
-&#x20; - `edit\_last\_line\_item(session\_id, corrections)` — voice-driven correction of the
-
-&#x20;   most recent row only.
-
-&#x20; - `update\_price(spoken\_text, new\_price) → {item\_id, old\_price, new\_price}` — writes
-
-&#x20;   to `items.current\_price` and appends a `price\_history` row.
-
-&#x20; - `close\_bill(session\_id) → total`
-
-\- \*\*Response modality\*\*: likely no spoken reply needed back to the shopkeeper — the
-
-&#x20; screen update \*is\* the confirmation. Confirm before committing to silent/UI-only
-
-&#x20; mode vs. a short spoken acknowledgment per item.
-
-\- \*\*Quantity/unit parsing\*\*: don't rely purely on the model's free-form
-
-&#x20; interpretation for colloquial units (paav, dhai-sau gram) — pair the Live session
-
-&#x20; with a small deterministic parser/lookup table for known colloquial-to-standard
-
-&#x20; unit conversions, feeding the model's transcription into it rather than trusting
-
-&#x20; raw model output for numeric quantities.
-
-
-
-\## 8. Platform Sequencing
-
-
-
-\- \*\*Phase 1 — Web app\*\*: fast prototyping step, not the long-term target. Build for
-
-&#x20; functional validation across devices (tablet + phone browser) rather than
-
-&#x20; investing heavily in PWA/offline polish.
-
-\- \*\*Phase 2 — Android app\*\*: the real intended target platform, reusing the same
-
-&#x20; Supabase backend and Gemini Live integration built in Phase 1.
-
-
-
-\## 9. Explicitly Out of Scope (v1)
-
-\- Multi-item-per-utterance parsing
-
-\- Always-listening / push-to-talk-less mode
-
-\- Login/access control (single operator, no auth)
-
-\- Khata/credit customer tracking
-
-\- GST/tax breakdown
-
-\- Automated discounts or rounding
-
-\- Batch price updates
 - Multi-item-per-utterance parsing
-
 - Always-listening / push-to-talk-less mode
-
-- Login/access control (single operator, no auth)
-
+- Login/access control (single operator, gated by 4-digit SHOP_PIN)
 - Khata/credit customer tracking
-
 - GST/tax breakdown
-
 - Automated discounts or rounding
-
 - Batch price updates
-
 - Offline-first / conflict resolution
 
-
-
-\## 10. Resolved Architectural Decisions (Pre-Build Alignment)
+## 10. Resolved Architectural Decisions (Pre-Build Alignment)
 
 - **Mid-bill Price Update Semantics:** Snapshot at add-time. When a catalog price is updated mid-bill, previous lines remain locked at their historical rate (matching paper billing). Future lines use the new rate. Verbal and tap corrections remain available for individual row edits.
-- **Alias Correction & Auto-Learn UX:** Inline 1-tap quick-map. Tapping an unmapped or misrecognized row opens an autocomplete picker to select the canonical SKU. Confirming updates the bill line and auto-learns the alias with a 5-second "Undo Mapping" toast. If the alias already exists on another item, a confirmation prompt prevents accidental overwrites.
-- **Feedback Modality:** Subtle Web Audio API earcon chimes (high-pitch ding on success, gentle error tone on miss) + instant DOM visual update. Gemini TTS is suppressed to prevent acoustic mic feedback and counter speech clutter.
-- **Mic Control:** Hold-to-Talk (press-and-hold on-screen button or Spacebar). Audio streams strictly while held, eliminating background shop noise and haggling.
+- **Alias Correction & Auto-Learn UX:** Inline 1-tap quick-map card in `AmbiguityBanner`. Tapping an unmapped or misrecognized row opens options to map to an existing SKU or add a new item, with conflict confirmation and a 5-second "Undo Mapping" toast.
+- **Feedback Modality:** Subtle Web Audio API earcon chimes (high-pitch ding on success, gentle error tone on miss) + instant DOM visual update. Gemini TTS is suppressed to prevent acoustic mic feedback.
+- **Mic Control:** Hold-to-Talk with warm audio pipeline. Microphone and AudioWorklet are acquired once on first gesture and remain active. Audio streaming is gated on press/release with a 300ms pre-roll ring buffer and 300ms release tail. UI is non-blocking after release.
+- **Gemini Live Signaling:** Manual activity signaling (`automaticActivityDetection.disabled = true`, `activityStart`, `activityEnd`). Server buffers overlapping utterances during pending tool calls to avoid protocol errors.
 - **Access Gate & Deployment:** Cloud Run deployment with native HTTPS/WSS for tablet microphone `getUserMedia` permissions. Gated by a 4-digit `SHOP_PIN` stored in tablet `localStorage`.
 - **State Synchronization:** Supabase Realtime is the single authoritative source of truth for bill updates across devices. Server WebSocket is strictly an audio and session control pipe.

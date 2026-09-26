@@ -52,6 +52,14 @@
 | 14 | Price-history: log-only (table populated by handler); no UI | ⬜ |
 | 15 | Manual test pass at the actual counter with real Hinglish phrasing; tune resolver threshold/margin; review latency logs | ⬜ |
 
+### 1E. Voice Pipeline Robustness & Pack-Size Resolution (Issues 1 & 2)
+
+| Step | Task | Deliverable | Status |
+|---|---|---|---|
+| 17 | **Issue 1: Hold-to-Talk Pipeline & Gemini Manual Activity** | Warm audio graph (`getUserMedia` + context + worklet initialized on first gesture); 300ms pre-roll ring buffer; release tail capture (`RELEASE_TAIL_MS = 300`) + worklet flush ack handshake before `mic_stop`; switch Gemini Live bridge to manual activity signaling (`automaticActivityDetection.disabled = true`, `activityStart`, `activityEnd`); non-blocking UI post-release with server audio queue buffering during pending tool calls (preventing 1008 WebSocket errors); browser `SpeechRecognition` off by default behind `?debugSpeech=true` / `NEXT_PUBLIC_DEBUG_SPEECH=true`; hide `ai_thought` from operator status bar; idempotent `close_bill`; latency + audio duration telemetry (`audio_ms_sent`, `preroll_ms`); unit tests for recorder gating/flush handshake & bridge activity signaling sequence. | ✅ |
+| 18 | **Issue 2a: Unrecognized Item Flow & Alias Auto-Learning** | Migration `02_pack_sizes_and_aliases.sql` (schema additions); server stores pending utterance in session context memory on `not_found`; `AmbiguityBanner` inline 3-action card ("Same as existing item" with fuzzy suggestions/search, "Add as new item" with prefilled form & suggested unit, "Ignore"); WebSocket `resolve_pending_item` handler; alias upsert with conflict confirmation and 5-second undo toast; automatic replay of pending line into `session_items`; tests for conflict & replay. | ⬜ |
+| 19 | **Issue 2b: Pack-Size Conversion & Deterministic Matcher** | Migration `02_pack_sizes_and_aliases.sql` columns `net_content numeric(10,3) null`, `net_content_unit text null check in ('g', 'ml')` + check constraint; seed backfill for weighted items (Haldi 100g, Taaza 250g, Tata Salt 1kg, Vim Bar 125g, Surf Excel 500g, etc.); deterministic conversion in `add_line_item` (`n = spoken / net_content`, integer within ±1% tolerance converts to `n` packets, non-multiples return `unit_mismatch`); missing pack size prompt & replay; loose vs packaged SKU tie-breaking; round half up to 2 dp rounding rule; unit test suite for multiples, tolerance, ml, mismatch, and dispatcher statuses. | ⬜ |
+
 ### Optional / deferred within Phase 1
 
 | Step | Task | Status |
